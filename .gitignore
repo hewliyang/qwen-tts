@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Model weights & training artifacts
+*.safetensors
+*.gguf
+*.bin
+*.pt
+*.ckpt
+lky_voice/
+lky_data/
+voice_output/
+voices/
+
+# Audio
+*.wav
+*.mp3
+*.flac
+
+# Training data
+*.jsonl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.venv/
