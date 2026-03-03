@@ -27,6 +27,7 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
+from mlx_audio.tts.models.qwen3_tts import Model as Qwen3TTSModel
 from mlx_lm.tuner.utils import LoRALinear
 
 from dataset import Batch, TTSDataset, load_jsonl
@@ -37,6 +38,35 @@ def _flatten_arrays(
 ) -> list[tuple[str, mx.array]]:
     """Flatten a parameter tree, casting values to mx.array."""
     return [(k, cast(mx.array, v)) for k, v in tree_flatten(tree)]
+
+
+def _add_flat_grads(
+    flat_a: list[tuple[str, mx.array]],
+    flat_b: list[tuple[str, mx.array]],
+) -> list[tuple[str, mx.array]]:
+    """Element-wise add two flattened gradient lists."""
+    return [(k1, v1 + v2) for (k1, v1), (_k2, v2) in zip(flat_a, flat_b, strict=False)]
+
+
+def _scale_flat_grads(
+    flat: list[tuple[str, mx.array]],
+    scale: float,
+) -> list[tuple[str, mx.array]]:
+    """Scale flattened gradients by a scalar."""
+    return [(k, v * scale) for k, v in flat]
+
+
+def _flat_grads_to_tree(flat: list[tuple[str, mx.array]]) -> object:
+    """Convert flattened gradients back to tree."""
+    return tree_unflatten(flat)
+
+
+def _global_grad_norm(flat_grads: list[tuple[str, mx.array]]) -> mx.array:
+    """Compute global L2 grad norm from flattened gradients."""
+    sq_sum = mx.array(0.0)
+    for _, g in flat_grads:
+        sq_sum = sq_sum + (g * g).sum()
+    return mx.sqrt(sq_sum)
 
 
 def cross_entropy_loss(
@@ -69,7 +99,7 @@ def cross_entropy_loss(
 
 
 def forward_sub_talker(
-    model,
+    model: Qwen3TTSModel,
     codec_ids_masked: mx.array,
     hidden_states_masked: mx.array,
 ) -> mx.array:
@@ -91,7 +121,10 @@ def forward_sub_talker(
     """
     talker = model.talker
     code_predictor = talker.code_predictor
-    num_code_groups = model.config.talker_config.num_code_groups
+    talker_cfg = model.config.talker_config
+    if talker_cfg is None:
+        raise ValueError("Missing talker_config in model config")
+    num_code_groups = talker_cfg.num_code_groups
 
     # Position 0: hidden states from talker
     sub_inputs = [hidden_states_masked[:, None, :]]
@@ -133,7 +166,7 @@ def forward_sub_talker(
     return total_loss / (num_code_groups - 1)
 
 
-def train_step(model, batch: Batch) -> mx.array:
+def train_step(model: Qwen3TTSModel, batch: Batch) -> mx.array:
     """Single training step: forward pass computing total loss.
 
     Replicates the PyTorch training logic from sft_12hz.py:
@@ -153,6 +186,8 @@ def train_step(model, batch: Batch) -> mx.array:
     codec_mask = batch.codec_mask  # [B, T]
 
     # 1. Speaker embedding (frozen)
+    if model.speaker_encoder is None:
+        raise ValueError("Model is missing speaker_encoder")
     speaker_embedding = mx.stop_gradient(model.speaker_encoder(ref_mels))
 
     # 2. Build input embeddings
@@ -161,6 +196,8 @@ def train_step(model, batch: Batch) -> mx.array:
 
     # Text embeddings
     talker_cfg = model.config.talker_config
+    if talker_cfg is None:
+        raise ValueError("Missing talker_config in model config")
     input_text_embedding = model.talker.model.text_embedding(input_text_ids)
     if talker_cfg.text_hidden_size != talker_cfg.hidden_size:
         input_text_embedding = model.talker.text_projection(input_text_embedding)
@@ -171,29 +208,14 @@ def train_step(model, batch: Batch) -> mx.array:
 
     # Inject speaker embedding at position 6
     B = input_codec_embedding.shape[0]
-    T_dim = input_codec_embedding.shape[1]
-    H = input_codec_embedding.shape[2]
-
-    # Zero out position 6
-    pos_mask = mx.ones((1, T_dim, 1))
-    pos_mask = mx.put_along_axis(
-        pos_mask,
-        mx.array([[[6]]]),
-        mx.array([[[0.0]]]),
+    input_codec_embedding = mx.concatenate(
+        [
+            input_codec_embedding[:, :6, :],
+            speaker_embedding[:, None, :],
+            input_codec_embedding[:, 7:, :],
+        ],
         axis=1,
     )
-    input_codec_embedding = input_codec_embedding * pos_mask
-
-    # Set position 6 to speaker embedding
-    speaker_at_6 = mx.zeros((B, T_dim, H))
-    idx = mx.full((B, 1), 6, dtype=mx.int32)
-    speaker_at_6 = mx.put_along_axis(
-        speaker_at_6,
-        idx[:, :, None] * mx.ones((1, 1, H), dtype=mx.int32),
-        speaker_embedding[:, None, :],
-        axis=1,
-    )
-    input_codec_embedding = input_codec_embedding + speaker_at_6
 
     input_embeddings = input_text_embedding + input_codec_embedding
 
@@ -219,24 +241,20 @@ def train_step(model, batch: Batch) -> mx.array:
     sub_talker_loss = mx.array(0.0)
     for batch_idx in range(B):
         mask_b = shifted_codec_mask[batch_idx]
-        mask_int = mx.array(mask_b).astype(mx.int32)
-        n_valid = mask_int.sum().item()
-
-        if n_valid == 0:
-            continue
 
         # Convert to numpy for index computation
         mask_np = np.array(mask_b)
         shifted_indices = np.nonzero(mask_np)[0]
+        if shifted_indices.size == 0:
+            continue
         shifted_indices_mx = mx.array(shifted_indices)
 
         hidden_b = talker_hidden[batch_idx]
         hidden_masked = hidden_b[shifted_indices_mx]
 
-        # Original (unshifted) codec mask positions
-        orig_mask_np = np.array(codec_mask[batch_idx])
-        orig_indices = np.nonzero(orig_mask_np)[0]
-        orig_indices_mx = mx.array(orig_indices)
+        # Original (unshifted) codec positions corresponding to shifted mask.
+        # shifted_codec_mask = codec_mask[:, 1:], so indices map by +1.
+        orig_indices_mx = mx.array(shifted_indices + 1)
         codec_masked = codec_ids[batch_idx][orig_indices_mx]
 
         sub_loss_b = forward_sub_talker(model, codec_masked, hidden_masked)
@@ -250,7 +268,7 @@ def train_step(model, batch: Batch) -> mx.array:
 
 
 def apply_lora_to_talker(
-    model,
+    model: Qwen3TTSModel,
     lora_rank: int = 8,
     lora_scale: float = 20.0,
     lora_layers: int | None = None,
@@ -304,7 +322,7 @@ def apply_lora_to_talker(
 
 
 def save_checkpoint(
-    model,
+    model: Qwen3TTSModel,
     model_path: Path,
     output_dir: str,
     speaker_name: str,
@@ -466,6 +484,12 @@ def main() -> None:
         help="Save checkpoint after every epoch",
     )
     parser.add_argument(
+        "--log-every",
+        type=int,
+        default=10,
+        help="Print optimizer-step loss every N updates (0 disables step logs)",
+    )
+    parser.add_argument(
         "--lora-rank",
         type=int,
         default=8,
@@ -493,6 +517,7 @@ def main() -> None:
     print(f"  Batch size:   {args.batch_size}")
     print(f"  LR:           {args.lr}")
     print(f"  Grad accum:   {args.grad_accum}")
+    print(f"  Log every:    {args.log_every}")
     print(f"  LoRA rank:    {args.lora_rank}")
     print(f"  LoRA scale:   {args.lora_scale}")
     print(f"  LoRA layers:  {args.lora_layers or 'all'}")
@@ -506,7 +531,7 @@ def main() -> None:
     from mlx_audio.utils import get_model_path
 
     model_path = get_model_path(args.model)
-    model = load_model(args.model)
+    model = cast(Qwen3TTSModel, load_model(model_path))
     print(f"done ({time.time() - t0:.1f}s)")
 
     if model.speaker_encoder is None:
@@ -570,9 +595,10 @@ def main() -> None:
     print("Starting training...")
     print(f"{'=' * 50}\n", flush=True)
 
-    accum_loss = 0.0
+    accum_loss_mx = mx.array(0.0)
     accum_steps = 0
-    accumulated_grads = None
+    accumulated_flat_grads: list[tuple[str, mx.array]] | None = None
+    optimizer_steps = 0
 
     for epoch in range(args.epochs):
         epoch_start = time.time()
@@ -587,98 +613,77 @@ def main() -> None:
         for batch_start in range(0, len(indices), args.batch_size):
             batch_end = batch_start + args.batch_size
             batch_indices = indices[batch_start:batch_end]
-            step_idx = batch_start // args.batch_size
-            print(
-                f"  E{epoch} S{step_idx}: loading batch...",
-                end="",
-                flush=True,
-            )
             batch_items = [dataset[i] for i in batch_indices]
             batch = dataset.collate(batch_items)
-            print(" fwd...", end="", flush=True)
 
             # Forward + backward
             loss, grads = loss_and_grad_fn(model, batch)
-            mx.eval(loss)
-            print(f" loss={loss.item():.3f}", flush=True)
 
             # Gradient accumulation
-            if accumulated_grads is None:
-                accumulated_grads = grads
+            flat_new = _flatten_arrays(grads)
+            if accumulated_flat_grads is None:
+                accumulated_flat_grads = flat_new
             else:
-                flat_acc = _flatten_arrays(accumulated_grads)
-                flat_new = _flatten_arrays(grads)
-                accumulated_grads = tree_unflatten(
-                    [
-                        (k, v1 + v2)
-                        for (k, v1), (_, v2) in zip(
-                            flat_acc,
-                            flat_new,
-                            strict=False,
-                        )
-                    ]
+                accumulated_flat_grads = _add_flat_grads(
+                    accumulated_flat_grads,
+                    flat_new,
                 )
 
             accum_steps += 1
-            accum_loss += loss.item()
+            accum_loss_mx = accum_loss_mx + loss
 
             if accum_steps >= args.grad_accum:
                 # Average gradients
-                accumulated_grads = tree_unflatten(
-                    [
-                        (k, v / args.grad_accum)
-                        for k, v in _flatten_arrays(accumulated_grads)
-                    ]
+                accumulated_flat_grads = _scale_flat_grads(
+                    accumulated_flat_grads,
+                    1.0 / args.grad_accum,
                 )
 
                 # Gradient clipping
                 if args.max_grad_norm > 0:
-                    flat_grads = _flatten_arrays(accumulated_grads)
-                    grad_norms = [mx.sqrt((g * g).sum()) for _, g in flat_grads]
-                    total_norm = mx.sqrt(
-                        mx.add(
-                            mx.array(0.0),
-                            sum(n * n for n in grad_norms),
-                        )
-                    )
+                    total_norm = _global_grad_norm(accumulated_flat_grads)
                     mx.eval(total_norm)
                     clip_coef = args.max_grad_norm / (total_norm.item() + 1e-6)
                     if clip_coef < 1.0:
-                        accumulated_grads = tree_unflatten(
-                            [
-                                (k, v * clip_coef)
-                                for k, v in _flatten_arrays(accumulated_grads)
-                            ]
+                        accumulated_flat_grads = _scale_flat_grads(
+                            accumulated_flat_grads,
+                            clip_coef,
                         )
 
                 # Update
-                optimizer.update(model, accumulated_grads)
-                mx.eval(model.parameters(), optimizer.state)
+                accumulated_grads = _flat_grads_to_tree(accumulated_flat_grads)
+                optimizer.update(model, cast(dict, accumulated_grads))
 
-                avg_loss = accum_loss / accum_steps
-                step_idx = batch_start // args.batch_size
-                print(f"  Epoch {epoch} | Step {step_idx} | Loss: {avg_loss:.4f}")
+                avg_loss_mx = accum_loss_mx / accum_steps
+                mx.eval(avg_loss_mx, model.parameters(), optimizer.state)
+                avg_loss = float(avg_loss_mx.item())
+
+                optimizer_steps += 1
+                if args.log_every > 0 and (optimizer_steps % args.log_every == 0):
+                    step_idx = batch_start // args.batch_size
+                    print(f"  Epoch {epoch} | Step {step_idx} | Loss: {avg_loss:.4f}")
 
                 epoch_loss += avg_loss
                 num_steps += 1
-                accum_loss = 0.0
+                accum_loss_mx = mx.array(0.0)
                 accum_steps = 0
-                accumulated_grads = None
-
-                mx.clear_cache()
+                accumulated_flat_grads = None
 
         # Handle remaining accumulated gradients
-        if accum_steps > 0:
-            accumulated_grads = tree_unflatten(
-                [(k, v / accum_steps) for k, v in _flatten_arrays(accumulated_grads)]
+        if accum_steps > 0 and accumulated_flat_grads is not None:
+            accumulated_flat_grads = _scale_flat_grads(
+                accumulated_flat_grads,
+                1.0 / accum_steps,
             )
-            optimizer.update(model, accumulated_grads)
-            mx.eval(model.parameters(), optimizer.state)
-            epoch_loss += accum_loss / accum_steps
+            accumulated_grads = _flat_grads_to_tree(accumulated_flat_grads)
+            optimizer.update(model, cast(dict, accumulated_grads))
+            avg_loss_mx = accum_loss_mx / accum_steps
+            mx.eval(avg_loss_mx, model.parameters(), optimizer.state)
+            epoch_loss += float(avg_loss_mx.item())
             num_steps += 1
-            accum_loss = 0.0
+            accum_loss_mx = mx.array(0.0)
             accum_steps = 0
-            accumulated_grads = None
+            accumulated_flat_grads = None
 
         epoch_time = time.time() - epoch_start
         avg_epoch_loss = epoch_loss / max(num_steps, 1)
@@ -687,6 +692,8 @@ def main() -> None:
             f"Avg Loss: {avg_epoch_loss:.4f} | "
             f"Time: {epoch_time:.1f}s\n"
         )
+
+        mx.clear_cache()
 
         # Save checkpoint
         if args.save_every_epoch or epoch == args.epochs - 1:
