@@ -43,7 +43,7 @@ def load_model_for_encoding(model_id: str) -> Qwen3TTSModel:
     from mlx_audio.tts.utils import load_model
     from mlx_audio.utils import get_model_path
 
-    model = cast(Qwen3TTSModel, load_model(Path(model_id)))
+    model = cast(Qwen3TTSModel, load_model(model_id))
 
     # If encoder already loaded, great
     if (

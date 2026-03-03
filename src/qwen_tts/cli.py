@@ -48,7 +48,7 @@ def load_tts_model(model_id: str) -> Qwen3TTSModel:
 
     print(f"Loading TTS model {model_id}...", end=" ", flush=True)
     t0 = time.time()
-    model = cast(Qwen3TTSModel, load_model(Path(model_id)))
+    model = cast(Qwen3TTSModel, load_model(model_id))
     print(f"done ({time.time() - t0:.1f}s)")
     return model
 
