@@ -45,10 +45,11 @@ def load_tts_model(model_id: str) -> Qwen3TTSModel:
     from typing import cast
 
     from mlx_audio.tts.utils import load_model
+    from mlx_audio.utils import get_model_path
 
     print(f"Loading TTS model {model_id}...", end=" ", flush=True)
     t0 = time.time()
-    model = cast(Qwen3TTSModel, load_model(model_id))
+    model = cast(Qwen3TTSModel, load_model(get_model_path(model_id)))
     print(f"done ({time.time() - t0:.1f}s)")
     return model
 
