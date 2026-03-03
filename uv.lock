@@ -818,7 +818,7 @@ wheels = [
 
 [[package]]
 name = "qwen-tts"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "librosa" },
@@ -831,6 +831,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "ruff" },
+    { name = "transformers" },
     { name = "ty" },
 ]
 
@@ -845,6 +846,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "ruff", specifier = ">=0.15.4" },
+    { name = "transformers", specifier = ">=5.0.0rc3" },
     { name = "ty", specifier = ">=0.0.19" },
 ]
 

@@ -29,7 +29,7 @@ from mlx.utils import tree_flatten, tree_unflatten
 from mlx_audio.tts.models.qwen3_tts import Model as Qwen3TTSModel
 from mlx_lm.tuner.utils import LoRALinear
 
-from dataset import Batch, TTSDataset, load_jsonl
+from .dataset import Batch, TTSDataset, load_jsonl
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -569,7 +569,7 @@ def main() -> None:
 
     # Extract speaker embedding from first sample
     print("[1/4] Loading ref audio...", flush=True)
-    from dataset import extract_mels, load_audio_24k
+    from .dataset import extract_mels, load_audio_24k
 
     ref_audio_path = train_data[0].ref_audio
     ref_audio, ref_sr = load_audio_24k(ref_audio_path)

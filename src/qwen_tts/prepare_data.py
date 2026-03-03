@@ -30,7 +30,7 @@ from mlx_audio.tts.models.qwen3_tts.speech_tokenizer import (
     Qwen3TTSSpeechTokenizer,
 )
 
-from dataset import TrainingRecord
+from .dataset import TrainingRecord
 
 
 def load_model_for_encoding(model_id: str) -> Qwen3TTSModel:

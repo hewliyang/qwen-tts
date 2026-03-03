@@ -5,104 +5,73 @@ Voice cloning & fine-tuning for [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
 ## Pipeline
 
 ```
-prepare_data.py → train.py → cli.py generate
+source audio → split → transcribe → prepare → train → generate → verify
 ```
 
-### 1. Prepare data
+The CLI handles the hard parts (codec encoding, training, inference). Everything else — splitting audio, transcribing, validating output — is done inline with `librosa` and `mlx-audio`'s STT models. See [SKILL.md](SKILL.md) for the full cookbook.
 
-Encodes WAV clips through the speech tokenizer to produce 16-codebook audio codes.
+## CLI commands
 
-```bash
-python prepare_data.py \
-    --input-dir ./clips/ \
-    --ref-audio ref.wav \
-    --output train.jsonl
-```
+| Command | Description |
+|---------|-------------|
+| `generate` | Generate speech from text |
+| `prepare` | Encode audio → codec tokens for training |
+| `train` | Fine-tune a custom voice (LoRA SFT) |
+| `speakers` | List available speakers |
+| `voices` | List trained voice models in a directory |
 
-Input: a directory of WAVs + `transcript.txt` (`001.wav|Hello world` per line), or a pre-built JSONL.  
-Output: JSONL with `audio_codes` (16 codebook indices per frame) added to each record.
-
-### 2. Train (`train.py`)
-
-LoRA SFT on the **talker transformer** to learn a target voice from a handful of clips.
-
-**What gets trained:**
-
-- LoRA adapters on `q_proj` / `v_proj` attention layers (~2–4M params vs ~755M frozen)
-- `codec_head` and `text_projection` are fully unfrozen
-
-**Forward pass** (mirrors the official PyTorch `sft_12hz.py`):
-
-1. Extract speaker embedding from reference mel via frozen `speaker_encoder`
-2. Build input embeddings: text embed + codec embed + sub-codebook embeds (codebooks 1–15), with speaker embedding injected at position 6
-3. Forward talker → CE loss on codec-0 prediction (next-token)
-4. Forward sub-talker (code predictor) → per-group CE loss on codebooks 1–15
-5. **Total loss = talker_loss + 0.3 × sub_talker_loss**
-
-**Checkpoint saving:** LoRA weights are mathematically merged back (`W + scale·B·A`) and the target speaker embedding is burned into `codec_embedding.weight[3000]`, producing a self-contained custom-voice model.
-
-```bash
-python train.py \
-    --train-jsonl train.jsonl \
-    --speaker-name lky \
-    --output ./voices/lky/ \
-    --epochs 3 \
-    --lr 2e-5 \
-    --lora-rank 8 \
-    --grad-accum 4
-```
-
-## CLI usage
-
-Models are auto-downloaded from HuggingFace on first use.
-
-| Model          | Description                                               |
-| -------------- | --------------------------------------------------------- |
-| `base`         | Zero-shot voice cloning via reference audio               |
-| `voice-design` | Describe any voice style via natural language (1.7B only) |
-| `custom-voice` | Pre-built speakers with optional emotion/style            |
-
-Sizes: 1.7B (default) or 0.6B (smaller/faster).
+### Generate
 
 ```bash
 # Basic TTS
 qwen-tts generate -p "Hello world"
 
-# Smaller 0.6B model
-qwen-tts generate -p "Hello world" --size 0.6B
-
-# Voice cloning (Base model)
+# Voice cloning (zero-shot, no training)
 qwen-tts generate -p "Hello world" --voice ref.wav
 
-# Style prompting (VoiceDesign, 1.7B only)
-qwen-tts generate -p "Hello world" \
-    --model voice-design \
-    --instruct "A warm, cheerful female voice"
+# VoiceDesign (1.7B only)
+qwen-tts generate -p "Hello world" --model voice-design --instruct "A warm, cheerful female voice"
 
-# Named speaker + emotion (CustomVoice)
-qwen-tts generate -p "Hello world" \
-    --model custom-voice --speaker Chelsie \
-    --instruct "Very excited"
-
-# List available speakers
-qwen-tts speakers
+# CustomVoice with emotion
+qwen-tts generate -p "Hello world" --model custom-voice --speaker Chelsie --instruct "Very excited"
 
 # Fine-tuned voice
-qwen-tts generate -p "Hello world" \
-    --speaker lky --voice-model ./voices/lky/
+qwen-tts generate -p "Hello world" --speaker lky --voice-model ./voices/lky/
 ```
+
+### Prepare & Train
+
+```bash
+# Encode audio clips to codec tokens
+qwen-tts prepare --data ./clips/ -o train.jsonl
+
+# Train a custom voice
+qwen-tts train --name lky --data train.jsonl -o ./voices/lky/ \
+    --epochs 3 --lr 2e-5 --grad-accum 4
+```
+
+## Model variants
+
+| Model | Description |
+|-------|-------------|
+| `base` | Zero-shot voice cloning via reference audio |
+| `voice-design` | Describe any voice style via natural language (1.7B only) |
+| `custom-voice` | Pre-built speakers with optional emotion/style |
+
+Sizes: 1.7B (default) or 0.6B (smaller/faster).
 
 ## Key files
 
-| File              | Purpose                                                                 |
-| ----------------- | ----------------------------------------------------------------------- |
-| `train.py`        | LoRA SFT loop (loss, LoRA injection, checkpoint merge)                  |
-| `dataset.py`      | `TTSDataset` + collation — tokenizes text, builds masks, pads batches   |
-| `prepare_data.py` | Encodes WAVs → 16-codebook codes via speech tokenizer                   |
-| `cli.py`          | Inference CLI wrapping `mlx-audio` (base / voice-design / custom-voice) |
+| File | Purpose |
+|------|---------|
+| `src/qwen_tts/cli.py` | CLI commands (generate, prepare, train, voices) |
+| `src/qwen_tts/train.py` | LoRA SFT training loop |
+| `src/qwen_tts/dataset.py` | `TTSDataset` + collation |
+| `src/qwen_tts/prepare_data.py` | Audio → 16-codebook codec encoding |
+| `SKILL.md` | Agent skill — full pipeline cookbook with code recipes |
 
 ## Requirements
 
-- Apple Silicon Mac (>16GB unified memory)
-- Python 3.10+
+- Apple Silicon Mac (≥16GB unified memory)
+- Python 3.10–3.12
 - `mlx`, `mlx-lm`, `mlx-audio`, `librosa`

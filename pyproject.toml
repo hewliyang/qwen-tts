@@ -1,7 +1,7 @@
 [project]
 name = "qwen-tts"
-version = "0.2.0"
-description = "Simple CLI for Qwen3-TTS on Apple Silicon via MLX — with voice fine-tuning"
+version = "0.3.0"
+description = "Voice cloning & fine-tuning for Qwen3-TTS on Apple Silicon via MLX"
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "mlx-audio>=0.3.1",
@@ -14,11 +14,10 @@ dependencies = [
 prerelease = "allow"
 
 [project.scripts]
-qwen-tts = "cli:main"
+qwen-tts = "qwen_tts.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
-only-include = ["cli.py", "train.py", "prepare_data.py", "dataset.py"]
+packages = ["src/qwen_tts"]
 
 [build-system]
 requires = ["hatchling"]
@@ -27,6 +26,7 @@ build-backend = "hatchling.build"
 [tool.ruff]
 target-version = "py310"
 line-length = 88
+src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
