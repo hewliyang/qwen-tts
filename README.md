@@ -12,13 +12,13 @@ The CLI handles the hard parts (codec encoding, training, inference). Everything
 
 ## CLI commands
 
-| Command | Description |
-|---------|-------------|
-| `generate` | Generate speech from text |
-| `prepare` | Encode audio → codec tokens for training |
-| `train` | Fine-tune a custom voice (LoRA SFT) |
-| `speakers` | List available speakers |
-| `voices` | List trained voice models in a directory |
+| Command    | Description                              |
+| ---------- | ---------------------------------------- |
+| `generate` | Generate speech from text                |
+| `prepare`  | Encode audio → codec tokens for training |
+| `train`    | Fine-tune a custom voice (LoRA SFT)      |
+| `speakers` | List available speakers                  |
+| `voices`   | List trained voice models in a directory |
 
 ### Generate
 
@@ -52,23 +52,13 @@ qwen-tts train --name lky --data train.jsonl -o ./voices/lky/ \
 
 ## Model variants
 
-| Model | Description |
-|-------|-------------|
-| `base` | Zero-shot voice cloning via reference audio |
+| Model          | Description                                               |
+| -------------- | --------------------------------------------------------- |
+| `base`         | Zero-shot voice cloning via reference audio               |
 | `voice-design` | Describe any voice style via natural language (1.7B only) |
-| `custom-voice` | Pre-built speakers with optional emotion/style |
+| `custom-voice` | Pre-built speakers with optional emotion/style            |
 
 Sizes: 1.7B (default) or 0.6B (smaller/faster).
-
-## Key files
-
-| File | Purpose |
-|------|---------|
-| `src/qwen_tts/cli.py` | CLI commands (generate, prepare, train, voices) |
-| `src/qwen_tts/train.py` | LoRA SFT training loop |
-| `src/qwen_tts/dataset.py` | `TTSDataset` + collation |
-| `src/qwen_tts/prepare_data.py` | Audio → 16-codebook codec encoding |
-| `SKILL.md` | Agent skill — full pipeline cookbook with code recipes |
 
 ## Requirements
 
