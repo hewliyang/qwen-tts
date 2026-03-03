@@ -18,6 +18,7 @@ import argparse
 import json
 import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -423,107 +424,71 @@ def save_checkpoint(
     print(f"  ✅ Checkpoint saved to {output_path}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="SFT training for Qwen3-TTS on MLX")
-    parser.add_argument(
-        "--train-jsonl",
-        type=str,
-        required=True,
-        help="Training JSONL (output of prepare_data.py)",
-    )
-    parser.add_argument(
-        "--speaker-name",
-        type=str,
-        default="speaker",
-        help="Speaker name for the fine-tuned model",
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        type=str,
-        default="./voice_output",
-        help="Output directory for checkpoint",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=("mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16"),
-        help="Base model to fine-tune",
-    )
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=3,
-        help="Number of training epochs",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1,
-        help="Batch size (1 recommended for memory)",
-    )
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=2e-5,
-        help="Learning rate",
-    )
-    parser.add_argument(
-        "--grad-accum",
-        type=int,
-        default=4,
-        help="Gradient accumulation steps",
-    )
-    parser.add_argument(
-        "--max-grad-norm",
-        type=float,
-        default=1.0,
-        help="Max gradient norm for clipping",
-    )
-    parser.add_argument(
-        "--save-every-epoch",
-        action="store_true",
-        help="Save checkpoint after every epoch",
-    )
-    parser.add_argument(
-        "--log-every",
-        type=int,
-        default=10,
-        help="Print optimizer-step loss every N updates (0 disables step logs)",
-    )
-    parser.add_argument(
-        "--lora-rank",
-        type=int,
-        default=8,
-        help="LoRA rank (0 = full fine-tune)",
-    )
-    parser.add_argument(
-        "--lora-scale",
-        type=float,
-        default=20.0,
-        help="LoRA scale/alpha",
-    )
-    parser.add_argument(
-        "--lora-layers",
-        type=int,
-        default=None,
-        help="Number of transformer layers for LoRA",
-    )
-    args = parser.parse_args()
+@dataclass
+class TrainConfig:
+    """Configuration for SFT training."""
 
+    data: str
+    """Path to training JSONL (output of prepare_data.py)."""
+
+    name: str = "speaker"
+    """Speaker name for the fine-tuned model."""
+
+    output: str = "./voice_output"
+    """Output directory for checkpoint."""
+
+    model_id: str = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16"
+    """Base model to fine-tune (HF repo ID or local path)."""
+
+    epochs: int = 3
+    """Number of training epochs."""
+
+    batch_size: int = 1
+    """Batch size (1 recommended for memory)."""
+
+    lr: float = 2e-5
+    """Learning rate."""
+
+    grad_accum: int = 4
+    """Gradient accumulation steps."""
+
+    max_grad_norm: float = 1.0
+    """Max gradient norm for clipping."""
+
+    save_every_epoch: bool = False
+    """Save checkpoint after every epoch."""
+
+    log_every: int = 10
+    """Print optimizer-step loss every N updates (0 disables step logs)."""
+
+    lora_rank: int = 8
+    """LoRA rank (0 = full fine-tune)."""
+
+    lora_scale: float = 20.0
+    """LoRA scale/alpha."""
+
+    lora_layers: int | None = None
+    """Number of transformer layers for LoRA (None = all)."""
+
+
+def run_training(config: TrainConfig) -> None:
+    """Run SFT training with the given configuration.
+
+    This is the main entry point for programmatic use.
+    """
     print("🎙️  Qwen3-TTS SFT Training (MLX) — LoRA")
     print(f"{'=' * 50}")
-    print(f"  Model:        {args.model}")
-    print(f"  Speaker:      {args.speaker_name}")
-    print(f"  Epochs:       {args.epochs}")
-    print(f"  Batch size:   {args.batch_size}")
-    print(f"  LR:           {args.lr}")
-    print(f"  Grad accum:   {args.grad_accum}")
-    print(f"  Log every:    {args.log_every}")
-    print(f"  LoRA rank:    {args.lora_rank}")
-    print(f"  LoRA scale:   {args.lora_scale}")
-    print(f"  LoRA layers:  {args.lora_layers or 'all'}")
-    print(f"  Output:       {args.output}")
+    print(f"  Model:        {config.model_id}")
+    print(f"  Speaker:      {config.name}")
+    print(f"  Epochs:       {config.epochs}")
+    print(f"  Batch size:   {config.batch_size}")
+    print(f"  LR:           {config.lr}")
+    print(f"  Grad accum:   {config.grad_accum}")
+    print(f"  Log every:    {config.log_every}")
+    print(f"  LoRA rank:    {config.lora_rank}")
+    print(f"  LoRA scale:   {config.lora_scale}")
+    print(f"  LoRA layers:  {config.lora_layers or 'all'}")
+    print(f"  Output:       {config.output}")
     print()
 
     # Load model
@@ -532,7 +497,7 @@ def main() -> None:
     from mlx_audio.tts.utils import load_model
     from mlx_audio.utils import get_model_path
 
-    model_path = get_model_path(args.model)
+    model_path = get_model_path(config.model_id)
     model = cast(Qwen3TTSModel, load_model(model_path))
     print(f"done ({time.time() - t0:.1f}s)")
 
@@ -544,13 +509,13 @@ def main() -> None:
         )
 
     # Apply LoRA
-    if args.lora_rank > 0:
+    if config.lora_rank > 0:
         print("Applying LoRA...", end=" ", flush=True)
         trainable, total = apply_lora_to_talker(
             model,
-            lora_rank=args.lora_rank,
-            lora_scale=args.lora_scale,
-            lora_layers=args.lora_layers,
+            lora_rank=config.lora_rank,
+            lora_scale=config.lora_scale,
+            lora_layers=config.lora_layers,
         )
         print(f"done ({trainable / 1e6:.1f}M / {total / 1e6:.1f}M trainable)")
     else:
@@ -558,7 +523,7 @@ def main() -> None:
 
     # Load training data
     print("Loading training data...", end=" ", flush=True)
-    train_data = load_jsonl(args.train_jsonl)
+    train_data = load_jsonl(config.data)
     print(f"{len(train_data)} samples")
 
     if model.tokenizer is None:
@@ -591,7 +556,7 @@ def main() -> None:
     )
 
     # Setup optimizer
-    optimizer = optim.AdamW(learning_rate=args.lr, weight_decay=0.01)
+    optimizer = optim.AdamW(learning_rate=config.lr, weight_decay=0.01)
 
     # Build loss+grad function
     loss_and_grad_fn = nn.value_and_grad(model, train_step)
@@ -606,7 +571,7 @@ def main() -> None:
     accumulated_flat_grads: list[tuple[str, mx.array]] | None = None
     optimizer_steps = 0
 
-    for epoch in range(args.epochs):
+    for epoch in range(config.epochs):
         epoch_start = time.time()
         epoch_loss = 0.0
         num_steps = 0
@@ -616,8 +581,8 @@ def main() -> None:
         np.random.shuffle(indices)
 
         # Process in batches
-        for batch_start in range(0, len(indices), args.batch_size):
-            batch_end = batch_start + args.batch_size
+        for batch_start in range(0, len(indices), config.batch_size):
+            batch_end = batch_start + config.batch_size
             batch_indices = indices[batch_start:batch_end]
             batch_items = [dataset[i] for i in batch_indices]
             batch = dataset.collate(batch_items)
@@ -638,18 +603,18 @@ def main() -> None:
             accum_steps += 1
             accum_loss_mx = accum_loss_mx + loss
 
-            if accum_steps >= args.grad_accum:
+            if accum_steps >= config.grad_accum:
                 # Average gradients
                 accumulated_flat_grads = _scale_flat_grads(
                     accumulated_flat_grads,
-                    1.0 / args.grad_accum,
+                    1.0 / config.grad_accum,
                 )
 
                 # Gradient clipping
-                if args.max_grad_norm > 0:
+                if config.max_grad_norm > 0:
                     total_norm = _global_grad_norm(accumulated_flat_grads)
                     mx.eval(total_norm)
-                    clip_coef = args.max_grad_norm / (total_norm.item() + 1e-6)
+                    clip_coef = config.max_grad_norm / (total_norm.item() + 1e-6)
                     if clip_coef < 1.0:
                         accumulated_flat_grads = _scale_flat_grads(
                             accumulated_flat_grads,
@@ -665,8 +630,8 @@ def main() -> None:
                 avg_loss = float(avg_loss_mx.item())
 
                 optimizer_steps += 1
-                if args.log_every > 0 and (optimizer_steps % args.log_every == 0):
-                    step_idx = batch_start // args.batch_size
+                if config.log_every > 0 and (optimizer_steps % config.log_every == 0):
+                    step_idx = batch_start // config.batch_size
                     print(f"  Epoch {epoch} | Step {step_idx} | Loss: {avg_loss:.4f}")
 
                 epoch_loss += avg_loss
@@ -702,16 +667,16 @@ def main() -> None:
         mx.clear_cache()
 
         # Save checkpoint
-        if args.save_every_epoch or epoch == args.epochs - 1:
-            if args.save_every_epoch:
-                ckpt_dir = str(Path(args.output) / f"checkpoint-epoch-{epoch}")
+        if config.save_every_epoch or epoch == config.epochs - 1:
+            if config.save_every_epoch:
+                ckpt_dir = str(Path(config.output) / f"checkpoint-epoch-{epoch}")
             else:
-                ckpt_dir = args.output
+                ckpt_dir = config.output
             save_checkpoint(
                 model,
                 model_path,
                 ckpt_dir,
-                args.speaker_name,
+                config.name,
                 target_speaker_embedding,
             )
 
@@ -721,9 +686,51 @@ def main() -> None:
     print("\nTo generate with your fine-tuned voice:")
     print(
         f'  qwen-tts generate -p "Hello world" '
-        f"--speaker {args.speaker_name} "
-        f"--voice-model {args.output}"
+        f"--speaker {config.name} "
+        f"--voice-model {config.output}"
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="SFT training for Qwen3-TTS on MLX")
+    parser.add_argument(
+        "--data",
+        type=str,
+        required=True,
+        help="Training JSONL (output of prepare_data.py)",
+    )
+    parser.add_argument(
+        "--name",
+        type=str,
+        default="speaker",
+        help="Speaker name for the fine-tuned model",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        default="./voice_output",
+        help="Output directory for checkpoint",
+    )
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+        help="Base model to fine-tune",
+    )
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--grad-accum", type=int, default=4)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--save-every-epoch", action="store_true")
+    parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument("--lora-rank", type=int, default=8)
+    parser.add_argument("--lora-scale", type=float, default=20.0)
+    parser.add_argument("--lora-layers", type=int, default=None)
+    args = parser.parse_args()
+
+    run_training(TrainConfig(**vars(args)))
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ Output: JSONL with audio_codes added.
 import argparse
 import dataclasses
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -230,66 +231,46 @@ def build_records_from_directory(
     return records
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Prepare training data for Qwen3-TTS SFT"
-    )
-    parser.add_argument(
-        "--data",
-        type=str,
-        required=True,
-        help="Directory of audio files OR input JSONL path",
-    )
-    parser.add_argument(
-        "--transcript",
-        type=str,
-        default=None,
-        help=(
-            "Transcript file (filename|text per line). "
-            "Required if --data is a directory."
-        ),
-    )
-    parser.add_argument(
-        "--ref-audio",
-        type=str,
-        default=None,
-        help=(
-            "Reference audio for speaker embedding "
-            "(used for all samples). "
-            "If not specified, uses the first audio clip."
-        ),
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        type=str,
-        required=True,
-        help="Output JSONL path with audio_codes",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=(
-            "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16"
-        ),
-        help="Base model to use for speech tokenizer",
-    )
-    args = parser.parse_args()
+@dataclass
+class PrepareConfig:
+    """Configuration for data preparation."""
 
-    # Build or load records
-    data_path = Path(args.data)
+    data: str
+    """Directory of audio files OR input JSONL path."""
+
+    output: str
+    """Output JSONL path with audio_codes."""
+
+    transcript: str | None = None
+    """Transcript file (filename|text per line). Required if data is a directory."""
+
+    ref_audio: str | None = None
+    """Reference audio for speaker embedding. If None, uses first audio clip."""
+
+    model_id: str = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16"
+    """Base model to use for speech tokenizer."""
+
+
+def run_prepare(config: PrepareConfig) -> None:
+    """Run data preparation with the given configuration.
+
+    This is the main entry point for programmatic use.
+    """
+    data_path = Path(config.data)
+    transcript = config.transcript
+    ref_audio = config.ref_audio
+
     if data_path.is_dir():
-        if args.transcript is None:
+        if transcript is None:
             default_transcript = data_path / "transcript.txt"
             if default_transcript.exists():
-                args.transcript = str(default_transcript)
+                transcript = str(default_transcript)
             else:
                 raise ValueError(
-                    "When --data is a directory, you must "
-                    "provide --transcript or have a "
+                    "When data is a directory, you must "
+                    "provide transcript or have a "
                     "transcript.txt in the directory."
                 )
-        ref_audio = args.ref_audio
         if ref_audio is None:
             wavs = sorted(data_path.glob("*.wav"))
             if not wavs:
@@ -302,7 +283,7 @@ def main() -> None:
                 f"{ref_audio}"
             )
         records = build_records_from_directory(
-            str(data_path), args.transcript, ref_audio
+            str(data_path), transcript, ref_audio
         )
     elif data_path.suffix in (".jsonl", ".json"):
         with open(data_path, encoding="utf-8") as f:
@@ -313,7 +294,7 @@ def main() -> None:
             ]
     else:
         raise ValueError(
-            "--data must be a directory or JSONL file, "
+            "data must be a directory or JSONL file, "
             f"got: {data_path}"
         )
 
@@ -323,7 +304,7 @@ def main() -> None:
     print(f"Found {len(records)} training records")
     print("Loading model for speech tokenizer...")
 
-    model = load_model_for_encoding(args.model)
+    model = load_model_for_encoding(config.model_id)
     speech_tokenizer = model.speech_tokenizer
     if speech_tokenizer is None:
         raise RuntimeError("Model is missing speech_tokenizer")
@@ -352,7 +333,7 @@ def main() -> None:
             mx.clear_cache()
 
     # Write output
-    output_path = Path(args.output)
+    output_path = Path(config.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         for record in output_records:
@@ -363,9 +344,39 @@ def main() -> None:
             )
 
     print(
-        f"\nWrote {len(output_records)} records "
-        f"to {args.output}"
+        f"\n✅ Wrote {len(output_records)} records "
+        f"to {config.output}"
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Prepare training data for Qwen3-TTS SFT"
+    )
+    parser.add_argument(
+        "--data", type=str, required=True,
+        help="Directory of audio files OR input JSONL path",
+    )
+    parser.add_argument(
+        "--transcript", type=str, default=None,
+        help="Transcript file (filename|text per line)",
+    )
+    parser.add_argument(
+        "--ref-audio", type=str, default=None,
+        help="Reference audio for speaker embedding",
+    )
+    parser.add_argument(
+        "--output", "-o", type=str, required=True,
+        help="Output JSONL path with audio_codes",
+    )
+    parser.add_argument(
+        "--model-id", type=str,
+        default="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+        help="Base model to use for speech tokenizer",
+    )
+    args = parser.parse_args()
+
+    run_prepare(PrepareConfig(**vars(args)))
 
 
 if __name__ == "__main__":

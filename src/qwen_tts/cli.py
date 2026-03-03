@@ -125,130 +125,21 @@ def cmd_speakers(args: argparse.Namespace) -> None:
 # ──────────────────────────────────────────────
 def cmd_prepare(args: argparse.Namespace) -> None:
     """Prepare training data: encode audio clips to codec tokens."""
-    import dataclasses
+    from .prepare_data import PrepareConfig, run_prepare
 
-    import mlx.core as mx
-
-    from .dataset import TrainingRecord
-    from .prepare_data import (
-        build_records_from_directory,
-        encode_audio,
-        load_audio_24k,
-        load_model_for_encoding,
-    )
-
-    data_path = Path(args.data)
-
-    # Build or load records
-    if data_path.is_dir():
-        transcript = args.transcript
-        if transcript is None:
-            default_transcript = data_path / "transcript.txt"
-            if default_transcript.exists():
-                transcript = str(default_transcript)
-            else:
-                print("ERROR: No transcript.txt found in data directory.")
-                print("Provide --transcript or create transcript.txt")
-                print("Format: one line per audio file — filename|text")
-                sys.exit(1)
-
-        ref_audio = args.ref_audio
-        if ref_audio is None:
-            wavs = sorted(data_path.glob("*.wav"))
-            if not wavs:
-                print("ERROR: No .wav files found in data directory")
-                sys.exit(1)
-            ref_audio = str(wavs[0])
-            print(f"Using first clip as reference audio: {ref_audio}")
-
-        records = build_records_from_directory(
-            str(data_path), transcript, ref_audio
-        )
-    elif data_path.suffix in (".jsonl", ".json"):
-        with open(data_path, encoding="utf-8") as f:
-            records = [
-                TrainingRecord(**json.loads(line.strip()))
-                for line in f
-                if line.strip()
-            ]
-    else:
-        print(f"ERROR: --data must be a directory or JSONL file, got: {data_path}")
-        sys.exit(1)
-
-    if not records:
-        print("ERROR: No training records found!")
-        sys.exit(1)
-
-    print(f"Found {len(records)} training records")
-    print("Loading model for speech tokenizer...")
-
-    model = load_model_for_encoding(args.model_id)
-    speech_tokenizer = model.speech_tokenizer
-    if speech_tokenizer is None:
-        print("ERROR: Model is missing speech_tokenizer")
-        sys.exit(1)
-
-    # Encode each audio
-    output_records: list[TrainingRecord] = []
-    for i, record in enumerate(records):
-        basename = Path(record.audio).name
-        print(
-            f"  [{i + 1}/{len(records)}] Encoding {basename}...",
-            end=" ",
-            flush=True,
-        )
-        audio_np = load_audio_24k(record.audio)
-        record.audio_codes = encode_audio(speech_tokenizer, audio_np)
-        print(f"{len(record.audio_codes)} frames")
-        output_records.append(record)
-
-        if (i + 1) % 10 == 0:
-            mx.clear_cache()
-
-    # Write output
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        for record in output_records:
-            row = dataclasses.asdict(record)
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    print(f"\n✅ Wrote {len(output_records)} records to {args.output}")
+    kw = {k: v for k, v in vars(args).items() if k != "command"}
+    run_prepare(PrepareConfig(**kw))
 
 
 # ──────────────────────────────────────────────
 #  train
 # ──────────────────────────────────────────────
 def cmd_train(args: argparse.Namespace) -> None:
-    """Run SFT training directly (no subprocess)."""
-    from .train import main as train_main
+    """Run SFT training directly."""
+    from .train import TrainConfig, run_training
 
-    train_argv = [
-        "train",
-        "--train-jsonl", args.data,
-        "--speaker-name", args.name,
-        "--output", args.output,
-        "--model", args.model_id,
-        "--epochs", str(args.epochs),
-        "--batch-size", str(args.batch_size),
-        "--lr", str(args.lr),
-        "--grad-accum", str(args.grad_accum),
-    ]
-    if args.lora_rank is not None:
-        train_argv.extend(["--lora-rank", str(args.lora_rank)])
-    if args.lora_scale is not None:
-        train_argv.extend(["--lora-scale", str(args.lora_scale)])
-    if args.save_every_epoch:
-        train_argv.append("--save-every-epoch")
-    if args.log_every is not None:
-        train_argv.extend(["--log-every", str(args.log_every)])
-
-    old_argv = sys.argv
-    sys.argv = train_argv
-    try:
-        train_main()
-    finally:
-        sys.argv = old_argv
+    kw = {k: v for k, v in vars(args).items() if k != "command" and v is not None}
+    run_training(TrainConfig(**kw))
 
 
 # ──────────────────────────────────────────────
