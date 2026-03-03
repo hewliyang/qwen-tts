@@ -16,11 +16,10 @@ Usage:
 
 import argparse
 import json
-import os
 import shutil
 import time
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -31,6 +30,9 @@ from mlx_audio.tts.models.qwen3_tts import Model as Qwen3TTSModel
 from mlx_lm.tuner.utils import LoRALinear
 
 from dataset import Batch, TTSDataset, load_jsonl
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
 
 
 def _flatten_arrays(
@@ -559,7 +561,11 @@ def main() -> None:
     train_data = load_jsonl(args.train_jsonl)
     print(f"{len(train_data)} samples")
 
-    dataset = TTSDataset(train_data, model.tokenizer, model.config)
+    if model.tokenizer is None:
+        raise ValueError("Tokenizer not loaded. Call post_load_hook first.")
+    tokenizer = cast("PreTrainedTokenizerBase", model.tokenizer)
+
+    dataset = TTSDataset(train_data, tokenizer, model.config)
 
     # Extract speaker embedding from first sample
     print("[1/4] Loading ref audio...", flush=True)
@@ -698,10 +704,7 @@ def main() -> None:
         # Save checkpoint
         if args.save_every_epoch or epoch == args.epochs - 1:
             if args.save_every_epoch:
-                ckpt_dir = os.path.join(
-                    args.output,
-                    f"checkpoint-epoch-{epoch}",
-                )
+                ckpt_dir = str(Path(args.output) / f"checkpoint-epoch-{epoch}")
             else:
                 ckpt_dir = args.output
             save_checkpoint(

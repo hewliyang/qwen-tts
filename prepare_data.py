@@ -19,17 +19,21 @@ Output: JSONL with audio_codes added.
 import argparse
 import dataclasses
 import json
-import os
 from pathlib import Path
+from typing import cast
 
 import librosa
 import mlx.core as mx
 import numpy as np
+from mlx_audio.tts.models.qwen3_tts import Model as Qwen3TTSModel
+from mlx_audio.tts.models.qwen3_tts.speech_tokenizer import (
+    Qwen3TTSSpeechTokenizer,
+)
 
 from dataset import TrainingRecord
 
 
-def load_model_for_encoding(model_id: str):
+def load_model_for_encoding(model_id: str) -> Qwen3TTSModel:
     """Load a base model with the speech tokenizer encoder.
 
     The default mlx-audio post_load_hook skips building the encoder.
@@ -39,7 +43,7 @@ def load_model_for_encoding(model_id: str):
     from mlx_audio.tts.utils import load_model
     from mlx_audio.utils import get_model_path
 
-    model = load_model(Path(model_id))
+    model = cast(Qwen3TTSModel, load_model(Path(model_id)))
 
     # If encoder already loaded, great
     if (
@@ -152,7 +156,8 @@ def load_model_for_encoding(model_id: str):
 
     model.load_speech_tokenizer(speech_tokenizer)
 
-    if not model.speech_tokenizer.has_encoder:
+    loaded_speech_tokenizer = model.speech_tokenizer
+    if loaded_speech_tokenizer is None or not loaded_speech_tokenizer.has_encoder:
         raise RuntimeError(
             "Failed to load speech tokenizer encoder"
         )
@@ -168,14 +173,14 @@ def load_audio_24k(path: str) -> np.ndarray:
 
 
 def encode_audio(
-    speech_tokenizer, audio_np: np.ndarray
-) -> list:
+    speech_tokenizer: Qwen3TTSSpeechTokenizer, audio_np: np.ndarray
+) -> list[list[int]]:
     """Encode audio through speech tokenizer."""
     audio_mx = mx.array(audio_np)[None, None, :]
     codes = speech_tokenizer.encode(audio_mx)
     mx.eval(codes)
     codes_np = np.array(codes[0]).T  # [time, 16]
-    return codes_np.tolist()
+    return cast(list[list[int]], codes_np.tolist())
 
 
 def build_records_from_directory(
@@ -320,11 +325,13 @@ def main() -> None:
 
     model = load_model_for_encoding(args.model)
     speech_tokenizer = model.speech_tokenizer
+    if speech_tokenizer is None:
+        raise RuntimeError("Model is missing speech_tokenizer")
 
     # Encode each audio
     output_records: list[TrainingRecord] = []
     for i, record in enumerate(records):
-        basename = os.path.basename(record.audio)
+        basename = Path(record.audio).name
         print(
             f"  [{i + 1}/{len(records)}] "
             f"Encoding {basename}...",
@@ -345,11 +352,9 @@ def main() -> None:
             mx.clear_cache()
 
     # Write output
-    os.makedirs(
-        os.path.dirname(os.path.abspath(args.output)),
-        exist_ok=True,
-    )
-    with open(args.output, "w", encoding="utf-8") as f:
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
         for record in output_records:
             row = dataclasses.asdict(record)
             f.write(

@@ -1,8 +1,10 @@
 import argparse
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
+from mlx_audio.tts.models.qwen3_tts import Model as Qwen3TTSModel
 
 # model_key -> { size -> HF repo }
 _MODEL_REPOS = {
@@ -38,12 +40,14 @@ def resolve_model_id(model_key: str, size: str) -> str:
     return repo
 
 
-def load_model(model_id):
+def load_model(model_id: str) -> Qwen3TTSModel:
+    from typing import cast
+
     from mlx_audio.tts.utils import load_model
 
     print(f"Loading {model_id}...", end=" ", flush=True)
     t0 = time.time()
-    model = load_model(model_id)
+    model = cast(Qwen3TTSModel, load_model(Path(model_id)))
     print(f"done ({time.time() - t0:.1f}s)")
     return model
 

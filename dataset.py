@@ -4,15 +4,22 @@ Dataset and collation for Qwen3-TTS SFT on MLX.
 Ported from the official PyTorch TTSDataset + collate_fn.
 """
 
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import librosa
 import mlx.core as mx
 import numpy as np
+from mlx_audio.tts.models.qwen3_tts import ModelConfig
 from mlx_audio.tts.models.qwen3_tts.qwen3_tts import (
     mel_spectrogram,
 )
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
 
 
 @dataclass
@@ -88,8 +95,8 @@ class TTSDataset:
     def __init__(
         self,
         data_list: list[TrainingRecord],
-        tokenizer,
-        config,
+        tokenizer: PreTrainedTokenizerBase,
+        config: ModelConfig,
     ):
         """
         Args:
@@ -142,6 +149,8 @@ class TTSDataset:
         """
         config = self.config
         talker_config = config.talker_config
+        if talker_config is None:
+            raise ValueError("Missing talker_config in model config")
 
         # Compute max sequence length
         item_lengths = [len(b.text_ids) + b.audio_codes.shape[0] for b in batch]
