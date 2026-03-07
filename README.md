@@ -5,20 +5,29 @@ Voice cloning & fine-tuning for [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
 ## Pipeline
 
 ```
-source audio → split → transcribe → prepare → train → generate → verify
+source audio → split → prepare → train → generate → check
 ```
 
-The CLI handles the hard parts (codec encoding, training, inference). Everything else — splitting audio, transcribing, validating output — is done inline with `librosa` and `mlx-audio`'s STT models. See [SKILL.md](SKILL.md) for the full cookbook.
+The CLI handles the full pipeline: ASR-based splitting & transcription, codec encoding, LoRA training, inference, and evaluation (local ASR + Gemini-as-judge). See [SKILL.md](SKILL.md) for the full cookbook.
 
 ## CLI commands
 
-| Command    | Description                              |
-| ---------- | ---------------------------------------- |
-| `generate` | Generate speech from text                |
-| `prepare`  | Encode audio → codec tokens for training |
-| `train`    | Fine-tune a custom voice (LoRA SFT)      |
-| `speakers` | List available speakers                  |
-| `voices`   | List trained voice models in a directory |
+| Command    | Description                                        |
+| ---------- | -------------------------------------------------- |
+| `split`    | ASR-based split + transcribe source audio to clips |
+| `prepare`  | Encode audio → codec tokens for training           |
+| `train`    | Fine-tune a custom voice (LoRA SFT)                |
+| `generate` | Generate speech from text                          |
+| `check`    | Evaluate output (ASR intelligibility + Gemini)     |
+| `speakers` | List available speakers in a voice model           |
+| `voices`   | List trained voice models in a directory           |
+
+### Split
+
+```bash
+# ASR-based split + transcribe (outputs clips + transcript.txt)
+qwen-tts split raw_audio/source_24k.wav -o ./clips --max-dur 8
+```
 
 ### Generate
 
@@ -48,6 +57,19 @@ qwen-tts prepare --data ./clips/ -o train.jsonl
 # Train a custom voice
 qwen-tts train --name lky --data train.jsonl -o ./voices/lky/ \
     --epochs 3 --lr 2e-5 --grad-accum 4
+```
+
+### Check
+
+```bash
+# ASR-only (local, no API key)
+qwen-tts check -g ./eval_clips --asr-only \
+    --expected-text "gen_00.wav=Hello world."
+
+# Full eval (ASR + Gemini speaker similarity)
+qwen-tts check -g ./eval_clips -r ./clips -S "Speaker Name" \
+    --max-clips 3 --pairs 3 \
+    --expected-text "gen_00.wav=Hello world."
 ```
 
 ## Model variants
