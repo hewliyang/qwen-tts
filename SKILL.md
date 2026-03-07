@@ -31,6 +31,8 @@ qwen-tts voices    [dir]
 qwen-tts speakers  --voice-model <dir>
 ```
 
+**Always start with the 0.6B model.** It trains faster, uses less memory, and produces good results. Only try 1.7B if 0.6B quality is insufficient.
+
 ## Pipeline Overview
 
 ```
@@ -82,20 +84,20 @@ ffmpeg -f concat -safe 0 -i <(for f in raw_audio/*.wav; do echo "file '$f'"; don
 Uses parakeet ASR to split audio on **sentence boundaries** and generate transcripts in one step. No more blind fixed-duration chopping.
 
 ```bash
-qwen-tts split raw_audio/source_24k.wav -o ./clips
+qwen-tts split raw_audio/source_24k.wav -o ./clips --max-dur 8
 ```
 
 This will:
 
 1. Run parakeet ASR on the full audio → sentence-level timestamps
-2. Merge short sentences into clips (3–15s target range)
+2. Merge short sentences into clips (3–8s target range)
 3. Slice audio at sentence boundaries
 4. Write clips + `transcript.txt`
 
 ### Options
 
 - `--min-dur 3.0` — minimum clip duration (seconds)
-- `--max-dur 15.0` — maximum clip duration (seconds)
+- `--max-dur 8.0` — maximum clip duration (seconds). **Keep ≤10s** — longer clips use more memory during training and can cause OOM with gradient accumulation.
 - `--pad 0.1` — padding around clip boundaries (seconds)
 - `--asr-model mlx-community/parakeet-tdt-0.6b-v3` — ASR model
 
@@ -122,7 +124,7 @@ One line per clip: `filename|transcription`. Filename is relative to the data di
 Encodes each audio clip through the speech tokenizer → codec tokens. Takes ~1-2 min for 75 clips.
 
 ```bash
-qwen-tts prepare --data ./clips -o ./clips/train.jsonl
+qwen-tts prepare --data ./clips -o ./clips/train.jsonl --model-id mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16
 ```
 
 This will:
@@ -165,6 +167,7 @@ qwen-tts train \
   --name <speaker_name> \
   --data ./clips/train.jsonl \
   --output ./<speaker_name>_voice \
+  --model-id mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16 \
   --epochs 3 \
   --lr 2e-5 \
   --grad-accum 4 \
@@ -173,22 +176,22 @@ qwen-tts train \
 
 ### Hyperparameters
 
-| Parameter      | Default | Notes                                                       |
-| -------------- | ------- | ----------------------------------------------------------- |
-| `--epochs`     | 3       | 2-5 typical. More risks overfitting with small data.        |
-| `--lr`         | 2e-5    | Lower (1e-5) for clean data, higher (5e-5) if underfitting. |
-| `--grad-accum` | 4       | Effective batch = batch_size × grad_accum.                  |
-| `--lora-rank`  | 8       | 4 for subtle shifts, 16 for stronger adaptation.            |
-| `--lora-scale` | 20.0    | Higher = stronger LoRA effect.                              |
-| `--batch-size` | 1       | Keep at 1 unless >64GB RAM.                                 |
+| Parameter      | Default | Notes                                                                                                                                        |
+| -------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--epochs`     | 3       | 2-5 typical. More risks overfitting with small data.                                                                                         |
+| `--lr`         | 2e-5    | Lower (1e-5) for clean data, higher (5e-5) if underfitting.                                                                                  |
+| `--grad-accum` | 4       | Effective batch = batch_size × grad_accum. **Use 2 if clips are long (>8s) or training hangs — reduces peak memory from holding gradients.** |
+| `--lora-rank`  | 8       | 4 for subtle shifts, 16 for stronger adaptation.                                                                                             |
+| `--lora-scale` | 20.0    | Higher = stronger LoRA effect.                                                                                                               |
+| `--batch-size` | 1       | Keep at 1 unless >64GB RAM.                                                                                                                  |
 
 ### What to watch
 
 - Loss should drop from ~4-6 to ~2-3 over 3 epochs
 - Loss plateaus above 4 → data quality issue or lr too low
 - Loss below 1 → overfitting, reduce epochs
-- ~15-20 min for 75 clips × 3 epochs on M-series
-- Peak memory: ~6-7GB
+- Epoch 0 is slow (~15 min) due to one-time Metal JIT shader compilation; subsequent epochs are fast (~40-60s each)
+- Peak memory: ~5-7GB
 
 ---
 
@@ -199,6 +202,7 @@ qwen-tts generate \
   -m custom-voice \
   --voice-model ./<speaker_name>_voice \
   --speaker <speaker_name> \
+  --size 0.6B \
   -p "Text to synthesize." \
   -o output.wav
 ```
@@ -214,7 +218,7 @@ prompts=(
 )
 for i in "${!prompts[@]}"; do
   qwen-tts generate -m custom-voice --voice-model ./<speaker_name>_voice \
-    --speaker <speaker_name> \
+    --speaker <speaker_name> --size 0.6B \
     -p "${prompts[$i]}" \
     -o "eval_clips/gen_$(printf '%02d' $i).wav"
 done
@@ -362,12 +366,12 @@ result = run_check(CheckConfig(
 ### Full automated loop
 
 ```bash
-qwen-tts prepare --data ./clips -o ./clips/train.jsonl
-qwen-tts train --name spk --data ./clips/train.jsonl -o ./spk_voice
+qwen-tts prepare --data ./clips -o ./clips/train.jsonl --model-id mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16
+qwen-tts train --name spk --data ./clips/train.jsonl -o ./spk_voice --model-id mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16
 mkdir -p eval_clips
-qwen-tts generate -m custom-voice --voice-model ./spk_voice --speaker spk \
+qwen-tts generate -m custom-voice --voice-model ./spk_voice --speaker spk --size 0.6B \
   -p "Test sentence one." -o eval_clips/gen_01.wav
-qwen-tts generate -m custom-voice --voice-model ./spk_voice --speaker spk \
+qwen-tts generate -m custom-voice --voice-model ./spk_voice --speaker spk --size 0.6B \
   -p "Test sentence two." -o eval_clips/gen_02.wav
 
 # Quick local check first (no API key)
@@ -385,25 +389,50 @@ qwen-tts check -g eval_clips -r clips -S "Speaker Name" \
 
 ## Data Requirements Summary
 
-| Requirement    | Value                                       |
-| -------------- | ------------------------------------------- |
-| Audio format   | WAV, 24kHz, mono, 16-bit PCM                |
-| Clip duration  | 5-15 seconds (8s ideal)                     |
-| Total duration | ~10 minutes (75-100 clips)                  |
-| Content        | Single speaker, clean speech, minimal noise |
-| Transcript     | Accurate text matching the speech           |
+| Requirement    | Value                                                                                          |
+| -------------- | ---------------------------------------------------------------------------------------------- |
+| Audio format   | WAV, 24kHz, mono, 16-bit PCM                                                                   |
+| Clip duration  | 3-8 seconds (5-8s ideal). **Keep ≤10s** — longer clips cause OOM during gradient accumulation. |
+| Total duration | ~8-10 minutes (50-80 clips). ~7,500 total codec frames is the sweet spot.                      |
+| Content        | Single speaker, clean speech, minimal noise                                                    |
+| Transcript     | Accurate text matching the speech                                                              |
 
 ## Troubleshooting
 
-| Problem                              | Solution                               |
-| ------------------------------------ | -------------------------------------- |
-| `No module named 'dotenv'`           | `uv pip install python-dotenv`         |
-| `No module named 'google.genai'`     | `uv pip install google-genai`          |
-| `speech_tokenizer encoder not found` | Use the base model for prepare         |
-| OOM during training                  | `--batch-size 1`, reduce `--lora-rank` |
-| OOM during generation                | Close other apps, or use `--size 0.6B` |
-| `incorrect regex pattern` warning    | Harmless — ignore                      |
-| `model of type qwen3_tts` warning    | Harmless — ignore                      |
+| Problem                              | Solution                                                                                                                                                           |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `No module named 'dotenv'`           | `uv pip install python-dotenv`                                                                                                                                     |
+| `No module named 'google.genai'`     | `uv pip install google-genai`                                                                                                                                      |
+| `speech_tokenizer encoder not found` | Use the base model for prepare                                                                                                                                     |
+| OOM / hang during training           | Reduce `--grad-accum` to 2, trim clips to ≤8s, reduce total to ~50-60 clips. Long clips + high grad-accum holds too many gradients in memory.                      |
+| OOM during `split` (ASR)             | Source audio too long (>~40 min). Split into chunks with ffmpeg first, run `qwen-tts split` on each, then merge clips + transcripts into one directory. See below. |
+| OOM during generation                | Close other apps, or use `--size 0.6B`                                                                                                                             |
+| `incorrect regex pattern` warning    | Harmless — ignore                                                                                                                                                  |
+| `model of type qwen3_tts` warning    | Harmless — ignore                                                                                                                                                  |
+
+### Chunking long source audio for `split`
+
+If `qwen-tts split` OOMs on a long file (>~40 min), chunk it with ffmpeg first:
+
+```bash
+mkdir -p raw_audio/chunks
+ffmpeg -i raw_audio/source_24k.wav -f segment -segment_time 600 -c copy raw_audio/chunks/chunk_%02d.wav
+
+for chunk in raw_audio/chunks/chunk_*.wav; do
+  qwen-tts split "$chunk" -o "clips_tmp/$(basename "$chunk" .wav)"
+done
+
+# Merge into one directory
+mkdir -p clips && idx=0
+for dir in clips_tmp/chunk_*/; do
+  while IFS='|' read -r f t; do
+    new=$(printf "clip_%03d.wav" $idx)
+    cp "${dir}${f}" "clips/${new}"
+    echo "${new}|${t}" >> clips/transcript.txt
+    idx=$((idx + 1))
+  done < "${dir}transcript.txt"
+done
+```
 
 ## Available Models
 

@@ -14,6 +14,10 @@ lky_voice/
 lky_data/
 voice_output/
 voices/
+ivan_clips/
+ivan_clips_tmp/
+ivan_leo_voice/
+ivan_selected/
 
 # Audio
 *.wav
