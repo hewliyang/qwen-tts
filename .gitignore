@@ -10,14 +10,11 @@ build/
 *.bin
 *.pt
 *.ckpt
-lky_voice/
-lky_data/
-voice_output/
+
+# Voices & data
 voices/
-ivan_clips/
-ivan_clips_tmp/
-ivan_leo_voice/
-ivan_selected/
+data/
+voice_output/
 
 # Audio
 *.wav
