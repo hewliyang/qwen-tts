@@ -47,10 +47,7 @@ def load_model_for_encoding(model_id: str) -> Qwen3TTSModel:
     model = cast(Qwen3TTSModel, load_model(get_model_path(model_id)))
 
     # If encoder already loaded, great
-    if (
-        model.speech_tokenizer is not None
-        and model.speech_tokenizer.has_encoder
-    ):
+    if model.speech_tokenizer is not None and model.speech_tokenizer.has_encoder:
         return model
 
     # Otherwise, try to load encoder manually
@@ -59,23 +56,16 @@ def load_model_for_encoding(model_id: str) -> Qwen3TTSModel:
     config_path = speech_tokenizer_path / "config.json"
 
     if not config_path.exists():
-        raise RuntimeError(
-            "No speech_tokenizer/config.json found in model"
-        )
+        raise RuntimeError("No speech_tokenizer/config.json found in model")
 
     with open(config_path) as f:
         st_config_dict = json.load(f)
 
     encoder_config_dict = st_config_dict.get("encoder_config")
     if encoder_config_dict is None:
-        raise RuntimeError(
-            "No encoder_config in speech tokenizer config"
-        )
+        raise RuntimeError("No encoder_config in speech tokenizer config")
 
-    print(
-        "  Building speech tokenizer encoder "
-        "(skipped by mlx-audio)..."
-    )
+    print("  Building speech tokenizer encoder (skipped by mlx-audio)...")
 
     from mlx_audio.tts.models.qwen3_tts.config import (
         Qwen3TTSTokenizerConfig,
@@ -92,24 +82,15 @@ def load_model_for_encoding(model_id: str) -> Qwen3TTSModel:
         Qwen3TTSTokenizerEncoderConfig, encoder_config_dict
     )
     # Handle _frame_rate -> frame_rate rename
-    if (
-        "frame_rate" not in enc_filtered
-        and "_frame_rate" in encoder_config_dict
-    ):
-        enc_filtered["frame_rate"] = encoder_config_dict[
-            "_frame_rate"
-        ]
-    encoder_config = Qwen3TTSTokenizerEncoderConfig(
-        **enc_filtered
-    )
+    if "frame_rate" not in enc_filtered and "_frame_rate" in encoder_config_dict:
+        enc_filtered["frame_rate"] = encoder_config_dict["_frame_rate"]
+    encoder_config = Qwen3TTSTokenizerEncoderConfig(**enc_filtered)
 
     dec_filtered = filter_dict_for_dataclass(
         Qwen3TTSTokenizerDecoderConfig,
         st_config_dict.get("decoder_config", {}),
     )
-    decoder_config = Qwen3TTSTokenizerDecoderConfig(
-        **dec_filtered
-    )
+    decoder_config = Qwen3TTSTokenizerDecoderConfig(**dec_filtered)
 
     tokenizer_config = Qwen3TTSTokenizerConfig(
         encoder_config=encoder_config,
@@ -124,9 +105,7 @@ def load_model_for_encoding(model_id: str) -> Qwen3TTSModel:
             setattr(tokenizer_config, k, v)
 
     # Build new speech tokenizer with encoder
-    speech_tokenizer = Qwen3TTSSpeechTokenizer(
-        tokenizer_config
-    )
+    speech_tokenizer = Qwen3TTSSpeechTokenizer(tokenizer_config)
 
     # Load weights
     tokenizer_weights: dict[str, mx.array] = {}
@@ -135,20 +114,14 @@ def load_model_for_encoding(model_id: str) -> Qwen3TTSModel:
         tokenizer_weights.update(loaded)  # type: ignore[arg-type]
 
     if tokenizer_weights:
-        sanitized = Qwen3TTSSpeechTokenizer.sanitize(
-            tokenizer_weights
-        )
-        speech_tokenizer.load_weights(
-            list(sanitized.items()), strict=False
-        )
+        sanitized = Qwen3TTSSpeechTokenizer.sanitize(tokenizer_weights)
+        speech_tokenizer.load_weights(list(sanitized.items()), strict=False)
         mx.eval(speech_tokenizer.parameters())
         speech_tokenizer.eval()
 
         # Initialize encoder codebooks
         if speech_tokenizer.encoder_model is not None:
-            quantizer = (
-                speech_tokenizer.encoder_model.quantizer
-            )
+            quantizer = speech_tokenizer.encoder_model.quantizer
             for layer in quantizer.rvq_first.vq.layers:
                 layer.codebook.update_in_place()
             for layer in quantizer.rvq_rest.vq.layers:
@@ -159,9 +132,7 @@ def load_model_for_encoding(model_id: str) -> Qwen3TTSModel:
 
     loaded_speech_tokenizer = model.speech_tokenizer
     if loaded_speech_tokenizer is None or not loaded_speech_tokenizer.has_encoder:
-        raise RuntimeError(
-            "Failed to load speech tokenizer encoder"
-        )
+        raise RuntimeError("Failed to load speech tokenizer encoder")
 
     print("  ✅ Encoder loaded successfully")
     return model
@@ -216,9 +187,7 @@ def build_records_from_directory(
                     audio_path = candidate
                     break
         if not audio_path.exists():
-            print(
-                f"  Warning: skipping {fname} (file not found)"
-            )
+            print(f"  Warning: skipping {fname} (file not found)")
             continue
         records.append(
             TrainingRecord(
@@ -274,29 +243,17 @@ def run_prepare(config: PrepareConfig) -> None:
         if ref_audio is None:
             wavs = sorted(data_path.glob("*.wav"))
             if not wavs:
-                raise ValueError(
-                    "No .wav files found in data directory"
-                )
+                raise ValueError("No .wav files found in data directory")
             ref_audio = str(wavs[0])
-            print(
-                "Using first clip as reference audio: "
-                f"{ref_audio}"
-            )
-        records = build_records_from_directory(
-            str(data_path), transcript, ref_audio
-        )
+            print(f"Using first clip as reference audio: {ref_audio}")
+        records = build_records_from_directory(str(data_path), transcript, ref_audio)
     elif data_path.suffix in (".jsonl", ".json"):
         with open(data_path, encoding="utf-8") as f:
             records = [
-                TrainingRecord(**json.loads(line.strip()))
-                for line in f
-                if line.strip()
+                TrainingRecord(**json.loads(line.strip())) for line in f if line.strip()
             ]
     else:
-        raise ValueError(
-            "data must be a directory or JSONL file, "
-            f"got: {data_path}"
-        )
+        raise ValueError(f"data must be a directory or JSONL file, got: {data_path}")
 
     if not records:
         raise ValueError("No training records found!")
@@ -314,16 +271,13 @@ def run_prepare(config: PrepareConfig) -> None:
     for i, record in enumerate(records):
         basename = Path(record.audio).name
         print(
-            f"  [{i + 1}/{len(records)}] "
-            f"Encoding {basename}...",
+            f"  [{i + 1}/{len(records)}] Encoding {basename}...",
             end=" ",
             flush=True,
         )
 
         audio_np = load_audio_24k(record.audio)
-        record.audio_codes = encode_audio(
-            speech_tokenizer, audio_np
-        )
+        record.audio_codes = encode_audio(speech_tokenizer, audio_np)
 
         print(f"{len(record.audio_codes)} frames")
         output_records.append(record)
@@ -338,15 +292,9 @@ def run_prepare(config: PrepareConfig) -> None:
     with open(output_path, "w", encoding="utf-8") as f:
         for record in output_records:
             row = dataclasses.asdict(record)
-            f.write(
-                json.dumps(row, ensure_ascii=False)
-                + "\n"
-            )
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    print(
-        f"\n✅ Wrote {len(output_records)} records "
-        f"to {config.output}"
-    )
+    print(f"\n✅ Wrote {len(output_records)} records to {config.output}")
 
 
 def main() -> None:
@@ -354,23 +302,33 @@ def main() -> None:
         description="Prepare training data for Qwen3-TTS SFT"
     )
     parser.add_argument(
-        "--data", type=str, required=True,
+        "--data",
+        type=str,
+        required=True,
         help="Directory of audio files OR input JSONL path",
     )
     parser.add_argument(
-        "--transcript", type=str, default=None,
+        "--transcript",
+        type=str,
+        default=None,
         help="Transcript file (filename|text per line)",
     )
     parser.add_argument(
-        "--ref-audio", type=str, default=None,
+        "--ref-audio",
+        type=str,
+        default=None,
         help="Reference audio for speaker embedding",
     )
     parser.add_argument(
-        "--output", "-o", type=str, required=True,
+        "--output",
+        "-o",
+        type=str,
+        required=True,
         help="Output JSONL path with audio_codes",
     )
     parser.add_argument(
-        "--model-id", type=str,
+        "--model-id",
+        type=str,
         default="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
         help="Base model to use for speech tokenizer",
     )

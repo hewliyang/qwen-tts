@@ -1,258 +1,416 @@
 ---
-name: qwen-tts
-description: "Clone and fine-tune voices using Qwen3-TTS on Apple Silicon (MLX). Full pipeline: source audio → split → transcribe → prepare codec tokens → LoRA training → inference → ASR verification. Use when the user wants to clone a voice, train a custom TTS voice, or generate speech."
-compatibility: "Apple Silicon Mac with ≥16GB unified memory. Python 3.10–3.12. MLX backend."
+name: qwen-tts-voice-cloning
+description: End-to-end voice cloning pipeline using qwen-tts on Apple Silicon. Covers data collection (yt-dlp), audio cleaning (ASR with parakeet-tdt-0.6b-v3), data preparation, LoRA fine-tuning, generation, and evaluation via ASR intelligibility check (local, no API) + Gemini-as-judge (qwen-tts check). Use when the user wants to clone a voice, train a TTS model, prepare voice training data, evaluate generated speech quality, or run the full collect→clean→prepare→train→generate→eval pipeline.
+allowed-tools: Bash, Read, Write, Edit
 ---
 
-# Qwen3-TTS Voice Cloning & Fine-Tuning
+# Qwen-TTS Voice Cloning Pipeline
 
-Train custom TTS voices on Apple Silicon via MLX.
+Full ML lifecycle for voice cloning on Apple Silicon (MLX). The `qwen-tts` package is installed via pip/uv and provides both a CLI and Python API.
 
-## Setup
+## Installation
 
 ```bash
-cd /Users/m1a1/Developer/qwen-tts
-source .venv/bin/activate
+# Install the package (includes mlx-audio, librosa, etc.)
+uv pip install qwen-tts
+
+# Additional tools for data collection & cleaning
+brew install yt-dlp ffmpeg  # if not already installed
+uv pip install google-genai python-dotenv  # for eval step
 ```
 
-## CLI Commands
+## Quick Reference
 
-These are the hard operations that require model loading, codec encoding, or training loops:
+```
+qwen-tts split     <audio> -o ./clips              # ASR-based split + transcribe
+qwen-tts prepare   --data <dir> -o train.jsonl
+qwen-tts train     --name <speaker> --data train.jsonl -o ./<speaker>_voice
+qwen-tts generate  -m custom-voice --voice-model <dir> --speaker <name> -p "text" -o out.wav
+qwen-tts check     -g <generated> -r <reference> -S "<Speaker Name>"
+qwen-tts voices    [dir]
+qwen-tts speakers  --voice-model <dir>
+```
 
-| Command                                                                       | Purpose                     |
-| ----------------------------------------------------------------------------- | --------------------------- |
-| `python -m qwen_tts generate -p "text"`                                       | Generate speech from text   |
-| `python -m qwen_tts generate -p "text" --voice ref.wav`                       | Zero-shot voice cloning     |
-| `python -m qwen_tts generate -p "text" --speaker name --voice-model ./voice/` | Generate with trained voice |
-| `python -m qwen_tts prepare --data ./clips/ -o train.jsonl`                   | Encode audio → codec tokens |
-| `python -m qwen_tts train --name speaker --data train.jsonl -o ./voice/`      | LoRA SFT training           |
-| `python -m qwen_tts speakers`                                                 | List available speakers     |
-| `python -m qwen_tts voices ./voices/`                                         | List trained voice models   |
+## Pipeline Overview
+
+```
+1. Collect     →  yt-dlp + ffmpeg
+2. Split       →  qwen-tts split (ASR sentence-aligned splitting + transcription)
+3. Prepare     →  qwen-tts prepare (encodes audio → codec tokens)
+4. Train       →  qwen-tts train (LoRA SFT, ~15 min on M-series)
+5. Generate    →  qwen-tts generate
+6. Evaluate    →  qwen-tts check (Gemini-as-judge)
+7. Iterate     →  adjust data / hyperparams based on eval
+```
 
 ---
 
-## Full Pipeline
+## Step 1: Data Collection
 
-### Step 1: Source Audio
+### Target: ~10 minutes of clean speech
 
-Collect audio of the target speaker. Ideal: 5–30 clips, 3–15 seconds each, clean speech, minimal background noise.
+```bash
+# Download audio from YouTube
+yt-dlp -x --audio-format wav -o "raw_audio/%(title)s.%(ext)s" "https://youtube.com/watch?v=VIDEO_ID"
 
-If starting from a long recording, split it into clips. Use `librosa.effects.split` for silence-based segmentation:
+# Convert to 24kHz mono WAV (required format)
+ffmpeg -i "raw_audio/source.wav" -ar 24000 -ac 1 "raw_audio/source_24k.wav"
+```
+
+### Multiple YouTube sources
+
+```bash
+for url in "URL1" "URL2" "URL3"; do
+  yt-dlp -x --audio-format wav -o "raw_audio/%(id)s.%(ext)s" "$url"
+done
+
+# Combine into one file
+ffmpeg -f concat -safe 0 -i <(for f in raw_audio/*.wav; do echo "file '$f'"; done) \
+  -ar 24000 -ac 1 "raw_audio/combined_24k.wav"
+```
+
+**Guidelines:**
+
+- 24kHz mono WAV is the required format
+- Prefer clear speech (interviews, lectures, speeches)
+- Remove music, background noise, other speakers before splitting
+
+---
+
+## Step 2: Split + Transcribe (ASR-based)
+
+Uses parakeet ASR to split audio on **sentence boundaries** and generate transcripts in one step. No more blind fixed-duration chopping.
+
+```bash
+qwen-tts split raw_audio/source_24k.wav -o ./clips
+```
+
+This will:
+
+1. Run parakeet ASR on the full audio → sentence-level timestamps
+2. Merge short sentences into clips (3–15s target range)
+3. Slice audio at sentence boundaries
+4. Write clips + `transcript.txt`
+
+### Options
+
+- `--min-dur 3.0` — minimum clip duration (seconds)
+- `--max-dur 15.0` — maximum clip duration (seconds)
+- `--pad 0.1` — padding around clip boundaries (seconds)
+- `--asr-model mlx-community/parakeet-tdt-0.6b-v3` — ASR model
+
+### After splitting, review `transcript.txt` and:
+
+- Fix transcription errors (they become training labels)
+- Remove clips with multiple speakers or heavy background noise
+- Ensure proper punctuation and capitalization
+
+### transcript.txt format
+
+```
+clip_000.wav|The stage that we have reached in Singapore. It was colorful, it was moving.
+clip_001.wav|These two need not run counter to each other. But in practice, they tend to...
+clip_002.wav|And the human knowledge approach tends to complicate methods in ways that...
+```
+
+One line per clip: `filename|transcription`. Filename is relative to the data directory.
+
+---
+
+## Step 3: Prepare Training Data
+
+Encodes each audio clip through the speech tokenizer → codec tokens. Takes ~1-2 min for 75 clips.
+
+```bash
+qwen-tts prepare --data ./clips -o ./clips/train.jsonl
+```
+
+This will:
+
+1. Read `clips/transcript.txt` automatically (or pass `--transcript`)
+2. Use first clip as reference audio (or pass `--ref-audio`)
+3. Encode each clip → 16-codebook tokens at 12Hz
+4. Write `train.jsonl`
+
+### train.jsonl format
+
+Each line is a JSON object:
+
+```json
+{
+  "audio": "clips/clip_000.wav",
+  "text": "The stage that we have reached in Singapore.",
+  "ref_audio": "./clips/clip_000.wav",
+  "audio_codes": [[1995, 431, 581, ...], [215, 431, 321, ...], ...]
+}
+```
+
+- `audio_codes`: 2D array `[time_frames, 16]` — 16 codebooks at 12Hz
+
+### Directory structure after prepare
+
+```
+clips/
+  clip_000.wav ... clip_074.wav
+  transcript.txt
+  train.jsonl
+```
+
+---
+
+## Step 4: Train (LoRA SFT)
+
+```bash
+qwen-tts train \
+  --name <speaker_name> \
+  --data ./clips/train.jsonl \
+  --output ./<speaker_name>_voice \
+  --epochs 3 \
+  --lr 2e-5 \
+  --grad-accum 4 \
+  --lora-rank 8
+```
+
+### Hyperparameters
+
+| Parameter      | Default | Notes                                                       |
+| -------------- | ------- | ----------------------------------------------------------- |
+| `--epochs`     | 3       | 2-5 typical. More risks overfitting with small data.        |
+| `--lr`         | 2e-5    | Lower (1e-5) for clean data, higher (5e-5) if underfitting. |
+| `--grad-accum` | 4       | Effective batch = batch_size × grad_accum.                  |
+| `--lora-rank`  | 8       | 4 for subtle shifts, 16 for stronger adaptation.            |
+| `--lora-scale` | 20.0    | Higher = stronger LoRA effect.                              |
+| `--batch-size` | 1       | Keep at 1 unless >64GB RAM.                                 |
+
+### What to watch
+
+- Loss should drop from ~4-6 to ~2-3 over 3 epochs
+- Loss plateaus above 4 → data quality issue or lr too low
+- Loss below 1 → overfitting, reduce epochs
+- ~15-20 min for 75 clips × 3 epochs on M-series
+- Peak memory: ~6-7GB
+
+---
+
+## Step 5: Generate
+
+```bash
+qwen-tts generate \
+  -m custom-voice \
+  --voice-model ./<speaker_name>_voice \
+  --speaker <speaker_name> \
+  -p "Text to synthesize." \
+  -o output.wav
+```
+
+### Batch generate for evaluation
+
+```bash
+mkdir -p eval_clips
+prompts=(
+  "The future depends on what we do today."
+  "We must be pragmatic and face reality as it is."
+  "Education is the key to progress and prosperity."
+)
+for i in "${!prompts[@]}"; do
+  qwen-tts generate -m custom-voice --voice-model ./<speaker_name>_voice \
+    --speaker <speaker_name> \
+    -p "${prompts[$i]}" \
+    -o "eval_clips/gen_$(printf '%02d' $i).wav"
+done
+```
+
+### Options
+
+- `--seed N` — reproducible output
+- `--play` — play audio after generation
+- Generation speed: ~0.5x real-time on M-series
+
+---
+
+## Step 6: Evaluate
+
+Two complementary checks. Run ASR first (free, local, fast) to catch intelligibility issues, then Gemini (API calls) for speaker similarity.
+
+### 6a: ASR intelligibility check (local, no API key)
+
+Runs parakeet on generated clips, compares transcription against the prompt text via word error rate (WER). Catches garbled speech, missing words, mispronunciations.
+
+```bash
+# ASR-only — no API key needed
+qwen-tts check \
+  -g ./eval_clips \
+  --asr-only \
+  --expected-text \
+    "gen_00.wav=The future depends on what we do today." \
+    "gen_01.wav=We must be pragmatic and face reality as it is."
+```
+
+### 6b: Gemini speaker similarity check (API calls)
+
+Requires `GEMINI_API_KEY` in environment or `.env` file. If not set, ask the user to provide one.
+
+```bash
+qwen-tts check \
+  -g ./eval_clips \
+  -r ./clips \
+  -S "Speaker Name" \
+  --max-clips 3 \
+  --pairs 3
+```
+
+### 6c: Both together (recommended)
+
+```bash
+qwen-tts check \
+  -g ./eval_clips \
+  -r ./clips \
+  -S "Speaker Name" \
+  --max-clips 3 \
+  --pairs 3 \
+  --expected-text \
+    "gen_00.wav=The future depends on what we do today." \
+    "gen_01.wav=We must be pragmatic and face reality as it is."
+
+# Add --json for machine-readable output
+```
+
+### How it works
+
+**ASR check** (local, 0 API calls): runs `mlx_audio.stt.generate` with `parakeet-tdt-0.6b-v3`, computes WER against expected text. Only runs for clips with `--expected-text`.
+
+**Gemini check** — total API calls = `max_clips + pairs` (report computed locally):
+
+- **Single clip eval** (1 call/clip):
+
+  ```json
+  {
+    "speaker_match": "yes|no|uncertain",
+    "confidence": "low|medium|high",
+    "natural": true,
+    "audio_quality": "poor|fair|good|excellent",
+    "issues": []
+  }
+  ```
+
+- **Pair comparison** (1 call/pair): sends ref + gen clip side by side:
+  ```json
+  {
+    "same_speaker": "yes|no|uncertain",
+    "similarity_score": 9,
+    "accent_match": true,
+    "cadence_match": true,
+    "tone_match": true,
+    "issues": []
+  }
+  ```
+
+**Report** (computed locally from above):
+
+```json
+{
+  "overall_pass": true,
+  "avg_wer": 0.0,
+  "intelligibility_rate": 1.0,
+  "speaker_match_rate": 1.0,
+  "naturalness_rate": 1.0,
+  "avg_similarity": 9.0
+}
+```
+
+### Pass criteria
+
+- Intelligibility rate ≥ 80% (WER < 30% per clip)
+- Speaker match rate ≥ 80% (Gemini)
+- Naturalness rate ≥ 80% (Gemini)
+- Avg similarity ≥ 6/10 (Gemini pair comparison)
+
+### Python API
 
 ```python
-import librosa
-import soundfile as sf
-import numpy as np
-from pathlib import Path
+from qwen_tts.check import CheckConfig, run_check
 
-audio, sr = librosa.load("source.wav", sr=24000, mono=True)
-intervals = librosa.effects.split(audio, top_db=30)
-
-output_dir = Path("./clips")
-output_dir.mkdir(exist_ok=True)
-
-# Merge short segments, split long ones
-min_dur, max_dur = 2.0, 15.0
-clips = []
-cur_start, cur_end = intervals[0]
-
-for start, end in intervals[1:]:
-    if (end - cur_start) / sr <= max_dur:
-        cur_end = end  # merge
-    else:
-        if (cur_end - cur_start) / sr >= min_dur:
-            clips.append((cur_start, cur_end))
-        cur_start, cur_end = start, end
-
-if (cur_end - cur_start) / sr >= min_dur:
-    clips.append((cur_start, cur_end))
-
-for i, (start, end) in enumerate(clips):
-    sf.write(str(output_dir / f"clip_{i:03d}.wav"), audio[start:end], sr)
-    print(f"clip_{i:03d}.wav: {(end - start) / sr:.1f}s")
-```
-
-Adjust `top_db` (silence threshold), `min_dur`, `max_dur` based on the source material. For noisy audio, increase `top_db`. For fast speakers, decrease `min_dur`.
-
-### Step 2: Transcribe
-
-Generate transcripts using ASR via mlx-audio. The agent needs accurate transcripts — ASR provides a starting point to review and correct.
-
-```python
-from mlx_audio.stt import load as load_stt
-from pathlib import Path
-
-model = load_stt("mlx-community/whisper-large-v3-turbo")
-
-clips_dir = Path("./clips")
-audio_files = sorted(clips_dir.glob("*.wav"))
-
-lines = []
-for af in audio_files:
-    result = model.generate(str(af), verbose=False)
-    text = result.text.strip()
-    lines.append(f"{af.name}|{text}")
-    print(f"{af.name}: {text}")
-
-(clips_dir / "transcript.txt").write_text("\n".join(lines) + "\n")
-```
-
-**STT model options:**
-
-- `mlx-community/whisper-large-v3-turbo` — fast, good quality (default choice)
-- `mlx-community/whisper-large-v3-mlx` — best quality, slower
-- `mlx-community/whisper-small` — fastest, lower quality
-- `mlx-community/parakeet-tdt-0.6b-v2` — alternative ASR engine
-- `mlx-community/parakeet-tdt-1.1b-v2` — larger parakeet
-
-**Review the transcript.** Fix ASR errors before proceeding — transcript accuracy directly affects training quality. The format is `filename|text` per line.
-
-### Step 3: Prepare Codec Tokens
-
-This is a CLI command — it loads the speech tokenizer encoder and encodes each audio clip into 16-codebook codes:
-
-```bash
-python -m qwen_tts prepare --data ./clips/ -o train.jsonl
-```
-
-Options:
-
-- `--ref-audio ref.wav` — explicit reference audio (default: first clip)
-- `--model-id <repo>` — base model (default: `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16`)
-
-Output: JSONL with `audio_codes` added to each record.
-
-### Step 4: Train
-
-```bash
-python -m qwen_tts train \
-    --name speaker_name \
-    --data train.jsonl \
-    --output ./voices/speaker_name/ \
-    --epochs 3 \
-    --lr 2e-5 \
-    --grad-accum 4
-```
-
-**Parameters:**
-
-- `--epochs` — 2–5 typical (default: 3)
-- `--lr` — 1e-5 to 5e-5 (default: 2e-5)
-- `--grad-accum` — effective batch size multiplier (default: 4)
-- `--lora-rank` — LoRA rank, higher = more capacity (default: 8)
-- `--batch-size` — keep at 1 to avoid OOM
-- `--save-every-epoch` — save intermediate checkpoints
-
-**What gets trained:** LoRA adapters on `q_proj`/`v_proj` attention layers (~2–4M params vs ~755M frozen), plus `codec_head` and `text_projection` fully unfrozen.
-
-**Output:** Self-contained voice model directory with merged LoRA weights and burned-in speaker embedding.
-
-### Step 5: Generate
-
-```bash
-python -m qwen_tts generate \
-    -p "Hello, this is my cloned voice." \
-    --speaker speaker_name \
-    --voice-model ./voices/speaker_name/ \
-    -o output.wav
-```
-
-### Step 6: Verify Quality (Round-Trip ASR)
-
-Agents can't hear audio. To validate TTS output, generate speech then transcribe it back and compare:
-
-```python
-from difflib import SequenceMatcher
-from mlx_audio.stt import load as load_stt
-
-input_text = "The quick brown fox jumps over the lazy dog."
-wav_path = "output.wav"  # generated in step 5
-
-stt = load_stt("mlx-community/whisper-large-v3-turbo")
-result = stt.generate(wav_path, verbose=False)
-transcribed = result.text.strip()
-
-similarity = SequenceMatcher(None, input_text.lower(), transcribed.lower()).ratio()
-print(f"Input:       {input_text}")
-print(f"Transcribed: {transcribed}")
-print(f"Similarity:  {similarity:.1%}")
-```
-
-Use judgment on what similarity threshold is acceptable — it depends on the text complexity, language, and use case. Common sense: if the transcription is gibberish, the voice needs more training data or different hyperparameters.
-
-**If quality is poor, consider:**
-
-- More training data (more clips)
-- More epochs (5–8) with lower LR (1e-5)
-- Checking transcript accuracy
-- Cleaner source audio
-
----
-
-## Zero-Shot Voice Cloning (No Training)
-
-For quick voice cloning without fine-tuning:
-
-```bash
-python -m qwen_tts generate -p "Text to speak" --voice reference.wav --voice-text "Transcript of reference"
+result = run_check(CheckConfig(
+    generated="./eval_clips",
+    reference="./clips",
+    speaker="Speaker Name",
+    max_clips=3,
+    pairs=3,
+    expected_texts={"gen_00.wav": "The future depends on what we do today."},
+))
+# result["report"]["overall_pass"] → True/False
+# result["asr_results"] → per-clip WER + transcription
+# result["single_results"] → Gemini per-clip evals
+# result["pair_results"] → Gemini pair comparisons
 ```
 
 ---
 
-## Model Variants
+## Step 7: Iterate
 
-| Model       | Flag                    | Description                                          |
-| ----------- | ----------------------- | ---------------------------------------------------- |
-| Base        | `--model base`          | Zero-shot voice cloning via reference audio          |
-| VoiceDesign | `--model voice-design`  | Describe voice style in natural language (1.7B only) |
-| CustomVoice | `--model custom-voice`  | Pre-built speakers with emotion/style control        |
-| Fine-tuned  | `--voice-model ./path/` | Your trained voice models                            |
+### Common eval failures → fixes
 
-Sizes: `--size 1.7B` (default) or `--size 0.6B` (faster, less quality).
+| Issue                     | Fix                                                       |
+| ------------------------- | --------------------------------------------------------- |
+| High WER / unintelligible | Bad training data quality, or overfitting — reduce epochs |
+| Low speaker match         | More/better data, increase epochs or lora-rank            |
+| Robotic / not natural     | Reduce epochs (overfitting), remove noisy clips           |
+| Wrong accent              | Remove clips with different accents                       |
+| Audio glitches            | Check source audio quality, remove bad clips              |
+| Low pair similarity       | Increase lora-rank (8→16), add more data                  |
 
----
+### Full automated loop
 
-## Data Validation
+```bash
+qwen-tts prepare --data ./clips -o ./clips/train.jsonl
+qwen-tts train --name spk --data ./clips/train.jsonl -o ./spk_voice
+mkdir -p eval_clips
+qwen-tts generate -m custom-voice --voice-model ./spk_voice --speaker spk \
+  -p "Test sentence one." -o eval_clips/gen_01.wav
+qwen-tts generate -m custom-voice --voice-model ./spk_voice --speaker spk \
+  -p "Test sentence two." -o eval_clips/gen_02.wav
 
-Before training, sanity-check the data. These are things to verify — use whatever approach makes sense for the situation:
+# Quick local check first (no API key)
+qwen-tts check -g eval_clips --asr-only \
+  --expected-text "gen_01.wav=Test sentence one." "gen_02.wav=Test sentence two."
 
-**Audio directory:**
-
-- All files in transcript.txt exist as audio files
-- Clip durations are reasonable (2–15s, not too short or too long)
-- Total audio is 1–10 minutes
-- Audio is clean speech (not music, not silence)
-
-**JSONL (after prepare):**
-
-- All records have `audio_codes`
-- Referenced audio and ref_audio paths exist
-- `audio_codes` have 16 codebooks per frame
-
-```python
-import json
-from pathlib import Path
-
-with open("train.jsonl") as f:
-    records = [json.loads(line) for line in f if line.strip()]
-
-for r in records:
-    assert r.get("audio_codes"), f"Missing codes: {r['audio']}"
-    assert Path(r["audio"]).exists(), f"Missing audio: {r['audio']}"
-    assert Path(r["ref_audio"]).exists(), f"Missing ref: {r['ref_audio']}"
-    assert len(r["audio_codes"][0]) == 16, f"Bad codebooks: {r['audio']}"
-
-print(f"✅ {len(records)} records validated")
+# Full check with Gemini
+qwen-tts check -g eval_clips -r clips -S "Speaker Name" \
+  --max-clips 2 --pairs 2 \
+  --expected-text "gen_01.wav=Test sentence one." "gen_02.wav=Test sentence two."
+# If FAIL → adjust data/hyperparams and re-run
 ```
 
 ---
+
+## Data Requirements Summary
+
+| Requirement    | Value                                       |
+| -------------- | ------------------------------------------- |
+| Audio format   | WAV, 24kHz, mono, 16-bit PCM                |
+| Clip duration  | 5-15 seconds (8s ideal)                     |
+| Total duration | ~10 minutes (75-100 clips)                  |
+| Content        | Single speaker, clean speech, minimal noise |
+| Transcript     | Accurate text matching the speech           |
 
 ## Troubleshooting
 
-**OOM during training:** Keep `--batch-size 1`, reduce `--lora-rank` to 4, use shorter clips, or use 0.6B base model.
+| Problem                              | Solution                               |
+| ------------------------------------ | -------------------------------------- |
+| `No module named 'dotenv'`           | `uv pip install python-dotenv`         |
+| `No module named 'google.genai'`     | `uv pip install google-genai`          |
+| `speech_tokenizer encoder not found` | Use the base model for prepare         |
+| OOM during training                  | `--batch-size 1`, reduce `--lora-rank` |
+| OOM during generation                | Close other apps, or use `--size 0.6B` |
+| `incorrect regex pattern` warning    | Harmless — ignore                      |
+| `model of type qwen3_tts` warning    | Harmless — ignore                      |
 
-**Poor voice quality:** Check transcript accuracy, try more epochs (5–8) with lower LR (1e-5), add more diverse clips, ensure clean audio.
+## Available Models
 
-**ASR errors:** Use `whisper-large-v3-mlx` for best accuracy. For non-English, whisper-large-v3 works best. Always manually review.
-
-**Slow model download:** Models are cached after first download (~3–6GB). First run is slow.
+| Key          | Size | HF Repo                                              |
+| ------------ | ---- | ---------------------------------------------------- |
+| base         | 1.7B | `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16`        |
+| base         | 0.6B | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16`        |
+| custom-voice | 1.7B | `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16` |
+| custom-voice | 0.6B | `mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16` |
+| voice-design | 1.7B | `mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16` |

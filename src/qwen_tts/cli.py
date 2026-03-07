@@ -144,6 +144,56 @@ def cmd_train(args: argparse.Namespace) -> None:
 
 
 # ──────────────────────────────────────────────
+#  check
+# ──────────────────────────────────────────────
+def cmd_check(args: argparse.Namespace) -> None:
+    """Evaluate voice quality using ASR and/or Gemini as judge."""
+    from .check import CheckConfig, run_check
+
+    # Parse --expected-text FILE=TEXT pairs
+    expected_texts: dict[str, str] = {}
+    if args.expected_text:
+        for item in args.expected_text:
+            if "=" in item:
+                fname, text = item.split("=", 1)
+                expected_texts[fname.strip()] = text.strip()
+
+    config = CheckConfig(
+        generated=args.generated,
+        reference=args.reference,
+        speaker=args.speaker,
+        pairs=args.pairs,
+        max_clips=args.max_clips,
+        model=args.gemini_model,
+        api_key=args.api_key,
+        expected_texts=expected_texts,
+        asr_model=args.asr_model,
+        skip_gemini=args.asr_only,
+    )
+    result = run_check(config)
+    if args.json_output:
+        print(json.dumps(result.to_dict(), indent=2))
+
+
+# ──────────────────────────────────────────────
+#  split
+# ──────────────────────────────────────────────
+def cmd_split(args: argparse.Namespace) -> None:
+    """Split long audio into sentence-aligned clips using ASR."""
+    from .split import SplitConfig, run_split
+
+    config = SplitConfig(
+        audio=args.audio,
+        output=args.output,
+        min_dur=args.min_dur,
+        max_dur=args.max_dur,
+        asr_model=args.asr_model,
+        pad=args.pad,
+    )
+    run_split(config)
+
+
+# ──────────────────────────────────────────────
 #  voices
 # ──────────────────────────────────────────────
 def cmd_voices(args: argparse.Namespace) -> None:
@@ -216,7 +266,10 @@ def main() -> None:
     gen.add_argument("--prompt", "-p", required=True, help="Text to speak")
     gen.add_argument("--output", "-o", default="output.wav", help="Output WAV path")
     gen.add_argument(
-        "--model", "-m", default="base", choices=_MODEL_REPOS.keys(),
+        "--model",
+        "-m",
+        default="base",
+        choices=_MODEL_REPOS.keys(),
         help="Model variant (default: base)",
     )
     gen.add_argument("--size", default=DEFAULT_SIZE, choices=SIZES, help="Model size")
@@ -244,7 +297,8 @@ def main() -> None:
     prep.add_argument("--ref-audio", help="Reference audio for speaker embedding")
     prep.add_argument("--output", "-o", default="train.jsonl", help="Output JSONL path")
     prep.add_argument(
-        "--model-id", default="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+        "--model-id",
+        default="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
         help="Base model for speech tokenizer",
     )
 
@@ -259,7 +313,8 @@ def main() -> None:
         help="Output directory",
     )
     trn.add_argument(
-        "--model-id", default="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+        "--model-id",
+        default="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
         help="Base model to fine-tune",
     )
     trn.add_argument("--epochs", type=int, default=3, help="Training epochs")
@@ -290,6 +345,97 @@ def main() -> None:
         help="Save after every epoch",
     )
 
+    # ── check ──
+    chk = sub.add_parser("check", help="Evaluate voice quality using Gemini as judge")
+    chk.add_argument(
+        "--generated",
+        "-g",
+        required=True,
+        help="Generated WAV file or directory of WAVs to evaluate",
+    )
+    chk.add_argument(
+        "--reference",
+        "-r",
+        default="",
+        help="Directory of reference clips from the real speaker",
+    )
+    chk.add_argument(
+        "--speaker",
+        "-S",
+        default="",
+        help="Target speaker name for Gemini eval (e.g. 'Lee Kuan Yew')",
+    )
+    chk.add_argument(
+        "--pairs",
+        type=int,
+        default=3,
+        help="Number of ref/gen pairs to compare",
+    )
+    chk.add_argument(
+        "--max-clips",
+        type=int,
+        default=5,
+        help="Max generated clips to evaluate",
+    )
+    chk.add_argument(
+        "--gemini-model",
+        default="gemini-3-flash-preview",
+        help="Gemini model to use as judge",
+    )
+    chk.add_argument(
+        "--api-key",
+        default="",
+        help="Gemini API key (or set GEMINI_API_KEY)",
+    )
+    chk.add_argument(
+        "--expected-text",
+        nargs="+",
+        metavar="FILE=TEXT",
+        help="Expected text per file for ASR check (e.g. gen_01.wav='Hello world')",
+    )
+    chk.add_argument(
+        "--asr-model",
+        default="mlx-community/parakeet-tdt-0.6b-v3",
+        help="ASR model for intelligibility check",
+    )
+    chk.add_argument(
+        "--asr-only",
+        action="store_true",
+        help="Run ASR check only, skip Gemini (no API key needed)",
+    )
+    chk.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        help="Output raw JSON",
+    )
+
+    # ── split ──
+    spl = sub.add_parser(
+        "split", help="Split long audio into sentence-aligned clips using ASR"
+    )
+    spl.add_argument("audio", help="Path to input audio file")
+    spl.add_argument(
+        "--output", "-o", default="./clips", help="Output directory for clips"
+    )
+    spl.add_argument(
+        "--min-dur", type=float, default=3.0, help="Minimum clip duration (seconds)"
+    )
+    spl.add_argument(
+        "--max-dur", type=float, default=15.0, help="Maximum clip duration (seconds)"
+    )
+    spl.add_argument(
+        "--asr-model",
+        default="mlx-community/parakeet-tdt-0.6b-v3",
+        help="ASR model for transcription",
+    )
+    spl.add_argument(
+        "--pad",
+        type=float,
+        default=0.1,
+        help="Padding around clip boundaries (seconds)",
+    )
+
     # ── voices ──
     vcs = sub.add_parser("voices", help="List trained voice models in a directory")
     vcs.add_argument("directory", nargs="?", default=".", help="Directory to search")
@@ -300,8 +446,10 @@ def main() -> None:
         "generate": cmd_generate,
         "g": cmd_generate,
         "speakers": cmd_speakers,
+        "split": cmd_split,
         "prepare": cmd_prepare,
         "train": cmd_train,
+        "check": cmd_check,
         "voices": cmd_voices,
     }
 
